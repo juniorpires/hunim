@@ -76,12 +76,19 @@ Hunim generates a standards-compliant RSS 2.0 feed at `{feeddir}/index.xml`. The
 - `link` — from `baseURL` in `hunim.toml`
 - Each item's `title`, `link`, `pubDate`, and `description` — from post frontmatter
 
-Link to the feed from your template:
+### Feed autodiscovery
+
+Hunim automatically advertises the feed for autodiscovery. Every page in a feed
+directory (the feed index and each post) gets a `<link rel="alternate">` injected
+into its `<head>`, as long as the template renders `{{ .MetaTags }}`:
 
 ```html
 <link rel="alternate" type="application/rss+xml"
-      title="My Blog" href="/blog/index.xml">
+      title="My Blog" href="https://example.com/blog/index.xml">
 ```
+
+The `title` comes from the feed's `index.md` frontmatter and the `href` points at
+the generated `index.xml`. You don't need to add this tag yourself.
 
 ## Example structure
 

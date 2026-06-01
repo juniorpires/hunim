@@ -10,6 +10,9 @@ import md4c_wrapper
 # Global caches for templates and components
 var templateCache = initTable[string, string]()
 var componentCache = initTable[string, string]()
+# Maps a feed directory (e.g. "public/blog") to its feed title, so feed pages
+# can advertise their RSS feed via <link rel="alternate">.
+var feedRegistry = initTable[string, string]()
 var buildDrafts = false
 
 let reload = """<script>var bfr = '';
@@ -568,6 +571,14 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
     metaTags &= &"\n  <link rel=\"canonical\" href=\"{job.baseUrl}{url}\">"
     metaTags &= &"\n  <meta property=\"og:url\" content=\"{job.baseUrl}{url}\">"
     sitemapUrl = job.baseUrl & url
+
+    var feedDir = job.feedDir
+    if feedDir == "" and feedRegistry.hasKey(job.path.parentDir):
+      feedDir = job.path.parentDir
+    if feedRegistry.hasKey(feedDir):
+      let feedTitle = feedRegistry[feedDir]
+      let feedHref = job.baseUrl & feedDir.replace("public/", "") & "/index.xml"
+      metaTags &= &"\n  <link rel=\"alternate\" type=\"application/rss+xml\" title=\"{feedTitle}\" href=\"{feedHref}\">"
   else:
     metaTags &= "\n  <meta name=\"robots\" content=\"noindex\">"
 
@@ -634,6 +645,7 @@ proc main(doReload: bool) =
   let lang = $table2["languageCode"]
 
   var sitemapUrls: seq[string] = @[]
+  feedRegistry.clear()
 
   proc collectJobs(dir: string, isFeed: bool, jobs: var seq[ConvertJob]) =
     ## Recursively collect all markdown conversion jobs
@@ -663,6 +675,7 @@ proc main(doReload: bool) =
           if frontmatter.hasKey("type") and frontmatter["type"] == "feed":
             isFeed2 = true
             generateRSSFeed(frontmatter, lang, baseUrl, path, path / "index.xml")
+            feedRegistry[path] = frontmatter.getOrDefault("title", "RSS Feed")
         collectJobs(path, isFeed2, jobs)
 
   var jobs: seq[ConvertJob] = @[]
