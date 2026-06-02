@@ -595,14 +595,15 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
   # Prepare content for rendering
   var content = htmlContent
 
-  # Prepare meta tags
+  # Prepare meta tags. Values are XML-escaped so titles/descriptions containing
+  # ", &, < or > don't truncate the attribute or inject stray markup.
   var metaTags = ""
   if desc != "no-index" and frontmatter.hasKey("title"):
-    let title = frontmatter["title"]
+    let title = xmlEscape(frontmatter["title"])
     metaTags &= &"\n  <meta property=\"og:title\" content=\"{title}\">"
 
   if desc != "" and desc != "no-index":
-    metaTags &= &"\n  <meta name=\"description\" content=\"{desc}\">"
+    metaTags &= &"\n  <meta name=\"description\" content=\"{xmlEscape(desc)}\">"
 
   var sitemapUrl = ""
   if desc != "no-index":
@@ -611,16 +612,17 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
       url = url.replace("/index.html", "")
     else:
       url = url.replace(".html", "")
-    metaTags &= &"\n  <link rel=\"canonical\" href=\"{job.baseUrl}{url}\">"
-    metaTags &= &"\n  <meta property=\"og:url\" content=\"{job.baseUrl}{url}\">"
+    let canonical = xmlEscape(job.baseUrl & url)
+    metaTags &= &"\n  <link rel=\"canonical\" href=\"{canonical}\">"
+    metaTags &= &"\n  <meta property=\"og:url\" content=\"{canonical}\">"
     sitemapUrl = job.baseUrl & url
 
     var feedDir = job.feedDir
     if feedDir == "" and feedRegistry.hasKey(job.path.parentDir):
       feedDir = job.path.parentDir
     if feedRegistry.hasKey(feedDir):
-      let feedTitle = feedRegistry[feedDir]
-      let feedHref = job.baseUrl & feedDir.replace("public/", "") & "/index.xml"
+      let feedTitle = xmlEscape(feedRegistry[feedDir])
+      let feedHref = xmlEscape(job.baseUrl & feedDir.replace("public/", "") & "/index.xml")
       metaTags &= &"\n  <link rel=\"alternate\" type=\"application/rss+xml\" title=\"{feedTitle}\" href=\"{feedHref}\">"
   else:
     metaTags &= "\n  <meta name=\"robots\" content=\"noindex\">"
