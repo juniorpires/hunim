@@ -1,3 +1,13 @@
+# 0.3.0
+
+## Features
+ - Added a `hunim build` command as an explicit alias for the default build
+ - Pages without a `title` now derive one from the filename (e.g. `my-cool-post.md` -> "My Cool Post"), used for both `{{ .Title }}` and `og:title`
+
+## Fixes
+ - Markdown files without frontmatter are now processed instead of erroring (#2)
+ - The dev-server auto-reload script is now injected automatically; the undocumented `{{ .Reload }}` placeholder no longer leaks as literal text on the page (#3)
+
 # 0.2.0
 
 ## Breaking
