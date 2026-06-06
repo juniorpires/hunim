@@ -18,7 +18,7 @@ var feedRegistry = initTable[string, string]()
 var feedPostLists = initTable[string, string]()
 var buildDrafts = false
 
-let reload = """<script>var bfr = '';
+let reloadScript = """<script>var bfr = '';
   setInterval(function () {
       fetch(window.location).then((response) => {
           return response.text();
@@ -33,9 +33,7 @@ let reload = """<script>var bfr = '';
           }
       });
   }, 100);
-</script>
-</head>
-"""
+</script>"""
 
 
 proc ctrlc() {.noconv.} =
@@ -200,8 +198,14 @@ proc processFile(path: string, baseUrl: string, doReload: bool, lang: string): s
   content = renderTemplate(content, context)
   content = processExecTags(content)
 
-  if doReload:
-    content = content.replace("</head>", reload)
+  # Inject the dev-server auto-reload script before `</head>` (only when serving;
+  # production builds get nothing). `{{ .Reload }}` is a legacy placeholder that
+  # is no longer documented, but we still resolve it so older templates that
+  # contain it don't leak the literal text into the page.
+  if content.contains("{{ .Reload }}"):
+    content = content.replace("{{ .Reload }}", (if doReload: reloadScript else: ""))
+  elif doReload:
+    content = content.replace("</head>", reloadScript & "\n</head>")
 
   var outputPath = path
   var wasRenamed = false

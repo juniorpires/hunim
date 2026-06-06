@@ -18,7 +18,7 @@ Create `templates/default.html` and it will be applied to every Markdown file th
   &lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1.0&quot;&gt;
   &lt;title&gt;&#123;&#123; .Title &#125;&#125;&lt;/title&gt;
   &#123;&#123; .MetaTags &#125;&#125;
-  &lt;link rel=&quot;stylesheet&quot; href=&quot;/style.css&quot;&gt;&#123;&#123; .Reload &#125;&#125;
+  &lt;link rel=&quot;stylesheet&quot; href=&quot;/style.css&quot;&gt;
 &lt;/head&gt;
 &lt;body&gt;
   &#123;&#123; .Content &#125;&#125;
@@ -38,7 +38,6 @@ Create `templates/default.html` and it will be applied to every Markdown file th
 <tr><td><code>&#123;&#123; .Author &#125;&#125;</code></td><td>The <code>author</code> field from frontmatter. Only set for feed posts.</td></tr>
 <tr><td><code>&#123;&#123; .Lang &#125;&#125;</code></td><td>The <code>languageCode</code> from <code>hunim.toml</code>.</td></tr>
 <tr><td><code>&#123;&#123; .MetaTags &#125;&#125;</code></td><td>Generated <code>&lt;meta&gt;</code> tags for SEO (og:title, description, canonical URL).</td></tr>
-<tr><td><code>&#123;&#123; .Reload &#125;&#125;</code></td><td>Dev-server auto-reload script. Injected when running <code>hunim server</code>; empty in production.</td></tr>
 </tbody>
 </table>
 
@@ -71,6 +70,6 @@ Templates can include [components](/components) using the component name syntax:
   &#123;&#123; footer &#125;&#125;
 &lt;/body&gt;</code></pre>
 
-## Placement of Reload
+## Auto-reload
 
-Place `&#123;&#123; .Reload &#125;&#125;` just before the closing `</head>` tag (or at the end of `<body>`). It injects a small polling script only when the dev server is active — in production builds the tag is replaced with nothing.
+When you run `hunim server`, a small polling script is injected automatically before the closing `</head>` of every page, so the browser refreshes on file changes. You don't need to add anything to your templates, and production builds (`hunim build`) contain no such script.

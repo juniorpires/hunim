@@ -7,12 +7,12 @@ desc: All Hunim commands and flags.
 
 ## Commands
 
-### `hunim`
+### `hunim` / `hunim build`
 
-Build the site. Reads from `src/`, writes to `public/`.
+Build the site. Reads from `src/`, writes to `public/`. `hunim build` is an explicit alias for the bare `hunim` command.
 
 ```
-hunim [--buildDrafts]
+hunim [build] [--buildDrafts]
 ```
 
 | Flag | Description |
@@ -31,7 +31,7 @@ hunim server [--buildDrafts]
 
 - Serves the built site at `http://127.0.0.1:8080`.
 - Watches `src/` for changes and rebuilds automatically.
-- Injects the `{{ .Reload }}` auto-reload script into every page (polls every 100 ms).
+- Injects an auto-reload script into every page (polls every 100 ms); production builds contain no such script.
 - Press `Ctrl+C` to stop.
 
 | Flag | Description |
