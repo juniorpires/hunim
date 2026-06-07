@@ -14,7 +14,7 @@ Create a component file, for example `components/header.html`:
 ```html
 <header>
   <a href="/">Home</a>
-  <a href="/blog/">Blog</a>
+  <a href="/blog">Blog</a>
   <a href="/about">About</a>
 </header>
 ```

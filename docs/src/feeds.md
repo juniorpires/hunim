@@ -58,8 +58,8 @@ Each post is rendered as a paragraph linking to the post, followed by its
 formatted publish date:
 
 ```html
-<p><a href="/blog/second-post/">Second Post</a> November 19, 2024</p>
-<p><a href="/blog/hello-world/">Hello World</a> July 29, 2024</p>
+<p><a href="/blog/second-post">Second Post</a> November 19, 2024</p>
+<p><a href="/blog/hello-world">Hello World</a> July 29, 2024</p>
 ```
 
 Post titles are rendered as inline markdown, so backticks and other inline
@@ -150,8 +150,6 @@ public/                   # Generated output
   blog/
     index.html
     index.xml             # RSS feed
-    hello-world/
-      index.html
-    second-post/
-      index.html
+    hello-world
+    second-post
 ```
