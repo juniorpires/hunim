@@ -117,7 +117,11 @@ proc parseTemplate(content: string, compName: string,
     if closeIdx == -1:
       break
 
-    let argsStr = newContent[openIdx + compName.len + 3 .. closeIdx - 1].strip()
+    # In Markdown pages, components are parsed after Markdown conversion, which
+    # escapes the argument quotes to `&quot;`. Normalize that back to `"` so the
+    # delimiter split works the same as in raw HTML pages and templates.
+    let argsStr = newContent[openIdx + compName.len + 3 .. closeIdx - 1]
+        .strip().replace("&quot;", "\"")
     let args = argsStr.split('"').filterIt(it.strip() != "")
 
     var replacedContent = compContent
