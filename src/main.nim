@@ -102,7 +102,55 @@ func shouldProcessFile(path: string): bool =
   let ext = path.splitFile().ext.toLowerAscii()
   return ext notin [".avif", ".webp", ".png", ".jpeg", ".jpg", ".svg"]
 
-proc parseTemplate(content: string, compName: string,
+# Hunim never expands `{{ … }}` directives inside <pre>/<code> regions, so
+# documentation can show literal template, component, and exec tags in code
+# samples without the build substituting them. The helpers below split content
+# into code and non-code spans; the three expansion passes run only over the
+# non-code spans.
+
+func nextCodeRegion(content: string, start: int): tuple[open: int,
+    closeTag: string] =
+  ## Locate the next <pre>/<code> opening tag at or after `start`.
+  ## Returns open = -1 when there is none.
+  const boundary = {'>', ' ', '\t', '\n', '\r', '/'}
+  var i = start
+  while true:
+    let lt = content.find('<', i)
+    if lt == -1:
+      return (-1, "")
+    # Require a tag boundary after the name so we don't trip on `<predicate>`
+    # or `<codex>`.
+    if content.continuesWith("pre", lt + 1) and
+        (lt + 4 >= content.len or content[lt + 4] in boundary):
+      return (lt, "</pre>")
+    if content.continuesWith("code", lt + 1) and
+        (lt + 5 >= content.len or content[lt + 5] in boundary):
+      return (lt, "</code>")
+    i = lt + 1
+
+iterator codeSegments(content: string): tuple[isCode: bool, text: string] =
+  ## Split `content` into alternating non-code and <pre>/<code> spans. A <pre>
+  ## fully encloses its inner <code>, so matching its own closing tag keeps the
+  ## whole block in a single verbatim span.
+  var i = 0
+  while i < content.len:
+    let region = nextCodeRegion(content, i)
+    if region.open == -1:
+      yield (false, content[i .. ^1])
+      break
+    if region.open > i:
+      yield (false, content[i ..< region.open])
+    let closeIdx = content.find(region.closeTag, region.open)
+    if closeIdx == -1:
+      # Unclosed region: keep the remainder verbatim rather than risk expanding
+      # a partially shown tag.
+      yield (true, content[region.open .. ^1])
+      break
+    let endIdx = closeIdx + region.closeTag.len
+    yield (true, content[region.open ..< endIdx])
+    i = endIdx
+
+proc parseTemplateSegment(content: string, compName: string,
     compContent: string): string =
   var newContent = content
   var startIdx = 0
@@ -136,16 +184,29 @@ proc parseTemplate(content: string, compName: string,
 
   return newContent
 
+proc parseTemplate(content: string, compName: string,
+    compContent: string): string =
+  ## Expand `{{ compName … }}` invocations, leaving any inside <pre>/<code>
+  ## (e.g. documentation code samples) untouched.
+  for seg in codeSegments(content):
+    result &= (if seg.isCode: seg.text
+               else: parseTemplateSegment(seg.text, compName, compContent))
+
 proc renderTemplate(templateContent: string, context: Table[string,
     string]): string =
-  # Renders a Go-style template by replacing {{ .Key }} with context values
+  ## Render a Go-style template by replacing {{ .Key }} with context values,
+  ## skipping any inside <pre>/<code> so documented tags stay literal. Each key
+  ## re-scans the current result, so content injected by an earlier key (e.g.
+  ## the page body via {{ .Content }}) is protected too.
   result = templateContent
   for key, value in context:
-    result = result.replace("{{ ." & key & " }}", value)
-  return result
+    let tag = "{{ ." & key & " }}"
+    var rebuilt = ""
+    for seg in codeSegments(result):
+      rebuilt &= (if seg.isCode: seg.text else: seg.text.replace(tag, value))
+    result = rebuilt
 
-proc processExecTags(content: string): string =
-  ## Replace {{ exec script.nims }} tags with the stdout of the NimScript
+proc processExecTagsSegment(content: string): string =
   var newContent = content
   var startIdx = 0
   while true:
@@ -180,6 +241,12 @@ proc processExecTags(content: string): string =
     startIdx = openIdx + trimmed.len
 
   return newContent
+
+proc processExecTags(content: string): string =
+  ## Replace {{ exec script.nims }} tags with the script's stdout, skipping any
+  ## inside <pre>/<code> so documented tags stay literal.
+  for seg in codeSegments(content):
+    result &= (if seg.isCode: seg.text else: processExecTagsSegment(seg.text))
 
 proc processFile(path: string, baseUrl: string, doReload: bool, lang: string): string =
   # Skip non-HTML files
@@ -575,9 +642,11 @@ type ConvertResult = object
   htmlOutput: string
 
 proc convertMarkdownWorker(job: ConvertJob): ConvertResult =
-  ## Worker function that converts markdown to HTML
-  let mdContent = processExecTags(nonFrontmatter(job.file))
-  let htmlOutput = markdown(mdContent)
+  ## Worker function that converts markdown to HTML. Exec tags are expanded
+  ## later (in processConvertedMarkdown, after the template is applied) so that,
+  ## like component and variable tags, they are never run inside a code sample —
+  ## whether written as a Markdown fence or a raw HTML block.
+  let htmlOutput = markdown(nonFrontmatter(job.file))
   return ConvertResult(job: job, htmlOutput: htmlOutput)
 
 proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =

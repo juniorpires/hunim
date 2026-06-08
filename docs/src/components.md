@@ -23,7 +23,7 @@ Then reference it anywhere with the component name (without the `.html` extensio
 
 <pre><code>&#123;&#123; header &#125;&#125;</code></pre>
 
-Hunim replaces the tag with the file's contents at build time. A component named `nav` would live in `components/nav.html` and be referenced as `&#123;&#123; nav &#125;&#125;`.
+Hunim replaces the tag with the file's contents at build time. A component named `nav` would live in `components/nav.html` and be referenced as `{{ nav }}`.
 
 ## Components with parameters
 
