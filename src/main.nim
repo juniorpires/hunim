@@ -10,6 +10,10 @@ import parsetoml
 # Global caches for templates and components
 var templateCache = initTable[string, string]()
 var componentCache = initTable[string, string]()
+# Caches the stdout of each {{ exec script.nims }} by script name, so a script
+# runs at most once per build no matter how many tags reference it (within a
+# page or across the whole site).
+var execCache = initTable[string, string]()
 # Maps a feed directory (e.g. "public/blog") to its feed title, so feed pages
 # can advertise their RSS feed via <link rel="alternate">.
 var feedRegistry = initTable[string, string]()
@@ -340,17 +344,23 @@ proc processExecTagsSegment(content: string): string =
       if c notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-'}:
         error &"exec script name contains invalid characters: {scriptName}"
 
-    let scriptPath = "components" / scriptName
+    var trimmed: string
+    if execCache.hasKey(scriptName):
+      trimmed = execCache[scriptName]
+    else:
+      let scriptPath = "components" / scriptName
 
-    if not fileExists(scriptPath):
-      error &"NimScript not found: {scriptPath}"
+      if not fileExists(scriptPath):
+        error &"NimScript not found: {scriptPath}"
 
-    let (output, exitCode) = execCmdEx("nim e --hints:off " & scriptPath)
-    if exitCode != 0:
-      error &"NimScript failed ({scriptName}):\n{output}"
+      let (output, exitCode) = execCmdEx("nim e --hints:off " & scriptPath)
+      if exitCode != 0:
+        error &"NimScript failed ({scriptName}):\n{output}"
+
+      trimmed = output.strip()
+      execCache[scriptName] = trimmed
 
     let fullMatch = newContent[openIdx .. closeIdx + 2]
-    let trimmed = output.strip()
     newContent = newContent.replace(fullMatch, trimmed)
     startIdx = openIdx + trimmed.len
 
@@ -936,6 +946,7 @@ proc main(doReload: bool) =
   var sitemapUrls: seq[string] = @[]
   feedRegistry.clear()
   feedPostLists.clear()
+  execCache.clear()
 
   proc collectJobs(dir: string, isFeed: bool, jobs: var seq[ConvertJob]) =
     ## Recursively collect all markdown conversion jobs
