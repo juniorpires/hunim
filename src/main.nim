@@ -763,6 +763,14 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
   else:
     metaTags &= "\n  <meta name=\"robots\" content=\"noindex\">"
 
+  # When the Markdown source is published alongside the HTML, advertise it as an
+  # alternate representation. The href is derived from job.path (not the canonical
+  # URL) so index pages map to /dir/index.md rather than /dir.md.
+  if keepMarkdown:
+    let mdUrl = xmltree.escape(
+      job.baseUrl & job.path.replace("public/", "").replace(".html", ".md"))
+    metaTags &= &"\n  <link rel=\"alternate\" type=\"text/markdown\" href=\"{mdUrl}\">"
+
   let f = open(job.path, fmWrite)
 
   if useTemplate:
