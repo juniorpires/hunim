@@ -1,5 +1,5 @@
 import std/[algorithm, sequtils, strformat, strutils, terminal, times, os,
-    osproc, tables, threadpool]
+    osproc, tables, threadpool, mimetypes, xmltree]
 import std/[asynchttpserver, asyncdispatch, uri]
 
 import ./[about, md4c_wrapper]
@@ -106,13 +106,6 @@ proc parseDate(date: string): DateTime =
     else: error &"Unknown time zone: {timezone}"
 
   return result
-
-func shouldProcessFile(path: string): bool =
-  if path.endsWith(".DS_Store"):
-    return false
-
-  let ext = path.splitFile().ext.toLowerAscii()
-  return ext notin [".avif", ".webp", ".png", ".jpeg", ".jpg", ".svg"]
 
 # Hunim never expands `{{ … }}` directives inside <pre>/<code> regions, so
 # documentation can show literal template, component, and exec tags in code
@@ -387,9 +380,6 @@ proc processFile(path: string, baseUrl: string, doReload: bool, lang: string): s
   if ext != ".html":
     return ""
 
-  if not shouldProcessFile(path):
-    return ""
-
   var content = readFile(path)
 
   # Use cached components instead of reading from disk
@@ -457,33 +447,6 @@ proc processDirectory(dir: string, baseUrl: string, urls: var seq[string], doRel
     elif kind == pcDir:
       processDirectory(path, baseUrl, urls, doReload, lang)
 
-type
-
-  TokenKind = enum
-    tkBar,
-    keyval,
-    tkText,
-    tkNewline,
-    tkEOF,
-
-  Token = ref object
-    kind: TokenKind
-    value: string
-
-  State = enum
-    startState,
-    headState,
-    finalState,
-
-  Lexer = ref object
-    name: string
-    text: string
-    currentChar: char
-    state: State
-    pos: int
-    line: int
-    col: int
-
 type BlogPost = object
   title: string
   link: string
@@ -492,101 +455,23 @@ type BlogPost = object
   pubDate: string
   dateObj: DateTime # For sorting
 
-func initLexer(name, text: string): Lexer =
-  Lexer(name: name, text: text,
-      currentChar: (if text.len > 0: text[0] else: '\0'),
-      state: startState, line: 1, col: 1)
-
-proc error(self: Lexer, msg: string) =
-  stderr.writeLine(&"{self.name}:{self.line}:{self.col} {msg}")
-  system.quit(1)
-
-proc advance(self: Lexer) =
-  self.pos += 1
-  if self.pos > len(self.text) - 1:
-    self.currentChar = '\0'
-  else:
-    if self.currentChar == '\n':
-      self.line += 1
-      self.col = 1
-    else:
-      self.col += 1
-
-    self.currentChar = self.text[self.pos]
-
-func peek(self: Lexer): char =
-  let peakPos = self.pos + 1
-  return (if peakPos > len(self.text) - 1: '\0' else: self.text[peakPos])
-
-func initToken(kind: TokenKind, value: string): Token =
-  return Token(kind: kind, value: value)
-
-proc getNextToken(self: Lexer): Token =
-  var rod = ""
-  while self.currentChar != '\0':
-    if self.currentChar == '\n':
-      self.advance()
-      return initToken(tkNewline, "")
-
-    rod &= self.currentChar
-
-    if self.state == headState and self.currentChar == ':':
-      self.advance() # then go to ` `
-      while self.currentChar == ' ':
-        self.advance()
-
-      rod = ""
-      while self.currentChar != '\n':
-        if self.currentChar == '\0':
-          self.error("Got EOF on key-value pair")
-
-        if self.currentChar != '\n':
-          rod &= self.currentChar
-
-        self.advance()
-
-      self.advance()
-      return initToken(keyval, rod)
-
-    if rod == "---":
-      self.advance()
-      self.advance()
-      if self.state == startState:
-        self.state = headState
-      elif self.state == headState:
-        self.state = finalState
-      return initToken(tkBar, "")
-
-    if self.peek() == '\n' or (self.state == headState and self.peek() == ':'):
-      self.advance()
-      if rod.strip() == "":
-        continue
-      else:
-        return initToken(tkText, rod)
-
-    self.advance()
-
-  return initToken(tkEOF, "")
-
 proc parseFrontmatter(file: string): Table[string, string] =
-  let text = readFile(file)
-  var lexer = initLexer(file, text)
-
-  # Frontmatter is optional; a file without a leading `---` has no metadata.
-  if getNextToken(lexer).kind != tkBar:
+  ## Parse optional `---`-delimited frontmatter into key/value pairs. Each line
+  ## is `key: value`; only the first colon splits, so values may contain colons
+  ## (e.g. RFC 2822 dates). A file with no leading `---` has no metadata.
+  let lines = readFile(file).splitLines()
+  if lines.len == 0 or lines[0].strip() != "---":
     return
 
-  var token = getNextToken(lexer)
-  while token.kind != tkBar:
-    if token.kind == tkText:
-      let key = token.value
-      token = getNextToken(lexer)
-      if token.kind != keyval:
-        lexer.error("frontmatter: Expected key value pair")
-      result[key] = token.value
-      token = getNextToken(lexer)
-    elif token.kind != tkBar:
-      lexer.error("frontmatter: Expected --- at the end")
+  var i = 1
+  while i < lines.len and lines[i].strip() != "---":
+    let colon = lines[i].find(':')
+    if colon == -1:
+      error &"{file}: frontmatter: expected 'key: value'"
+    result[lines[i][0 ..< colon].strip()] = lines[i][colon + 1 .. ^1].strip()
+    inc i
+  if i >= lines.len:
+    error &"{file}: frontmatter: missing closing ---"
 
 proc titleFromFilename(file: string): string =
   ## Derive a display title from a filename when a page has no `title`
@@ -617,32 +502,19 @@ proc extractMetadata(baseUrl, file: string,
   )
 
 proc nonFrontmatter(file: string): string =
+  ## Return the file body with any `---`-delimited frontmatter removed. A file
+  ## without a leading `---` is returned whole.
   let text = readFile(file)
-  var lexer = initLexer(file, text)
-
-  # Frontmatter is optional; without a leading `---` the whole file is content.
-  if getNextToken(lexer).kind != tkBar:
+  let lines = text.splitLines()
+  if lines.len == 0 or lines[0].strip() != "---":
     return text
 
-  var token = getNextToken(lexer)
-  while token.kind != tkBar:
-    if token.kind == tkText:
-      token = getNextToken(lexer)
-      if token.kind != keyval:
-        lexer.error("frontmatter: Expected key value pair")
-      token = getNextToken(lexer)
-    elif token.kind != tkBar:
-      lexer.error("frontmatter: Expected --- at the end")
-
-  return text[lexer.pos..^1]
-
-proc xmlEscape(text: string): string =
-  ## Escape characters that are special in XML/HTML.
-  text.replace("&", "&amp;")
-      .replace("<", "&lt;")
-      .replace(">", "&gt;")
-      .replace("\"", "&quot;")
-      .replace("'", "&#39;")
+  var i = 1
+  while i < lines.len and lines[i].strip() != "---":
+    inc i
+  if i >= lines.len:
+    error &"{file}: frontmatter: missing closing ---"
+  return lines[i + 1 .. ^1].join("\n")
 
 proc formatDisplayDate(date: string): string =
   ## Format an RFC 2822 date as "Month d, yyyy" for display.
@@ -699,12 +571,12 @@ proc generatePostList(baseUrl: string, posts: seq[BlogPost]): string =
 
 proc generateRSSFeed(frontmatter: Table[string, string], lang, baseUrl,
     outputPath: string, posts: seq[BlogPost]) =
-  let title = xmlEscape(frontmatter.getOrDefault("title", "RSS Feed"))
-  let desc = xmlEscape(frontmatter.getOrDefault("desc", "My RSS Feed"))
-  let link = xmlEscape(baseUrl)
+  let title = xmltree.escape(frontmatter.getOrDefault("title", "RSS Feed"))
+  let desc = xmltree.escape(frontmatter.getOrDefault("desc", "My RSS Feed"))
+  let link = xmltree.escape(baseUrl)
 
   # The feed's own canonical URL, advertised via <atom:link rel="self">.
-  let selfUrl = xmlEscape(baseUrl & outputPath.replace("public/", ""))
+  let selfUrl = xmltree.escape(baseUrl & outputPath.replace("public/", ""))
 
   # Generate RSS XML
   var rssContent = &"""<?xml version="1.0" encoding="UTF-8"?>
@@ -714,7 +586,7 @@ proc generateRSSFeed(frontmatter: Table[string, string], lang, baseUrl,
     <link>{link}</link>
     <atom:link href="{selfUrl}" rel="self" type="application/rss+xml"/>
     <description>{desc}</description>
-    <language>{xmlEscape(lang)}</language>
+    <language>{xmltree.escape(lang)}</language>
 """
 
   # Add items
@@ -722,11 +594,11 @@ proc generateRSSFeed(frontmatter: Table[string, string], lang, baseUrl,
     let summary =
       if post.desc != "": post.desc & " "
       else: ""
-    let description = xmlEscape(
+    let description = xmltree.escape(
       &"""{summary}<div style="margin-top: 50px; font-style: italic;"><strong><a href="{post.link}">Keep reading</a>.</strong></div>""")
-    let itemTitle = xmlEscape(post.title)
-    let itemLink = xmlEscape(post.link)
-    let pubDate = xmlEscape(post.pubDate)
+    let itemTitle = xmltree.escape(post.title)
+    let itemLink = xmltree.escape(post.link)
+    let pubDate = xmltree.escape(post.pubDate)
     rssContent &= &"""    <item>
       <title>{itemTitle}</title>
       <link>{itemLink}</link>
@@ -771,9 +643,7 @@ type ConvertJob = object
   feedDir: string
   body: string  # Markdown body, frontmatter-stripped and {{ exec }}-expanded
 
-type ConvertResult = object
-  job: ConvertJob
-  htmlOutput: string
+type ConvertResult = tuple[job: ConvertJob, htmlOutput: string]
 
 proc convertMarkdownWorker(job: ConvertJob): ConvertResult =
   ## Worker function that converts a Markdown body to HTML. The body has already
@@ -781,8 +651,7 @@ proc convertMarkdownWorker(job: ConvertJob): ConvertResult =
   ## that emits Markdown is rendered as part of the page. Component and variable
   ## tags are still expanded later, after the template is applied, so that — like
   ## exec — they are never run inside a code sample.
-  let htmlOutput = markdown(job.body)
-  return ConvertResult(job: job, htmlOutput: htmlOutput)
+  (job, markdown(job.body))
 
 proc expandMarkdown(content: string, context: Table[string, string]): string =
   ## Expand component, {{ .Var }}, and {{ exec }} tags in raw Markdown, leaving
@@ -867,10 +736,10 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
   var metaTags = ""
   let pageTitle = titleOf(job.file, frontmatter)
   if desc != "no-index" and pageTitle != "":
-    metaTags &= &"\n  <meta property=\"og:title\" content=\"{xmlEscape(pageTitle)}\">"
+    metaTags &= &"\n  <meta property=\"og:title\" content=\"{xmltree.escape(pageTitle)}\">"
 
   if desc != "" and desc != "no-index":
-    metaTags &= &"\n  <meta name=\"description\" content=\"{xmlEscape(desc)}\">"
+    metaTags &= &"\n  <meta name=\"description\" content=\"{xmltree.escape(desc)}\">"
 
   var sitemapUrl = ""
   if desc != "no-index":
@@ -879,7 +748,7 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
       url = url.replace("/index.html", "")
     else:
       url = url.replace(".html", "")
-    let canonical = xmlEscape(job.baseUrl & url)
+    let canonical = xmltree.escape(job.baseUrl & url)
     metaTags &= &"\n  <link rel=\"canonical\" href=\"{canonical}\">"
     metaTags &= &"\n  <meta property=\"og:url\" content=\"{canonical}\">"
     sitemapUrl = job.baseUrl & url
@@ -888,8 +757,8 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
     if feedDir == "" and feedRegistry.hasKey(job.path.parentDir):
       feedDir = job.path.parentDir
     if feedRegistry.hasKey(feedDir):
-      let feedTitle = xmlEscape(feedRegistry[feedDir])
-      let feedHref = xmlEscape(job.baseUrl & feedDir.replace("public/", "") & "/index.xml")
+      let feedTitle = xmltree.escape(feedRegistry[feedDir])
+      let feedHref = xmltree.escape(job.baseUrl & feedDir.replace("public/", "") & "/index.xml")
       metaTags &= &"\n  <link rel=\"alternate\" type=\"application/rss+xml\" title=\"{feedTitle}\" href=\"{feedHref}\">"
   else:
     metaTags &= "\n  <meta name=\"robots\" content=\"noindex\">"
@@ -1058,40 +927,14 @@ proc newSite(siteName: string) =
 """,
   )
 
+var mimeDb = newMimetypes()
+mimeDb.register("md", "text/markdown")
+mimeDb.register("avif", "image/avif")
+
 proc getMimeType(filename: string): string =
   let ext = splitFile(filename).ext.toLowerAscii()
-  case ext
-  of ".html", ".htm":
-    return "text/html; charset=utf-8"
-  of ".css":
-    return "text/css; charset=utf-8"
-  of ".js":
-    return "application/javascript; charset=utf-8"
-  of ".json":
-    return "application/json; charset=utf-8"
-  of ".xml":
-    return "application/xml; charset=utf-8"
-  of ".md":
-    return "text/markdown; charset=utf-8"
-  of ".png":
-    return "image/png"
-  of ".jpg", ".jpeg":
-    return "image/jpeg"
-  of ".gif":
-    return "image/gif"
-  of ".svg":
-    return "image/svg+xml"
-  of ".webp":
-    return "image/webp"
-  of ".avif":
-    return "image/avif"
-  of ".wasm":
-    return "application/wasm"
-  of ".ttf":
-    return "font/ttf"
-  of ".pdf":
-    return "application/pdf"
-  of "":
+  if ext == "":
+    # Extensionless clean-URL page: sniff for HTML, otherwise treat as binary.
     if fileExists(filename):
       try:
         # Read only the prefix needed to sniff for HTML, not the whole file.
@@ -1106,8 +949,13 @@ proc getMimeType(filename: string): string =
       except CatchableError:
         discard
     return "application/octet-stream"
-  else:
-    return "application/octet-stream"
+
+  # mimeDb is populated once at startup and only read here; the dev server is
+  # single-threaded, so reading it from the async handler is gc-safe.
+  {.cast(gcsafe).}:
+    result = mimeDb.getMimetype(ext[1 .. ^1], "application/octet-stream")
+  if result.startsWith("text/") or result in ["application/json", "application/xml"]:
+    result &= "; charset=utf-8"
 
 proc serveFile(path: string): tuple[code: HttpCode, content: string,
     mimeType: string] =
