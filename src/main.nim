@@ -357,7 +357,8 @@ proc processExecTagsSegment(content: string): string =
       if not fileExists(scriptPath):
         error &"NimScript not found: {scriptPath}"
 
-      let (output, exitCode) = execCmdEx("nim e --hints:off " & scriptPath)
+      let (output, exitCode) = execCmdEx(
+          "nim e --hints:off " & quoteShell(scriptPath))
       if exitCode != 0:
         error &"NimScript failed ({scriptName}):\n{output}"
 
