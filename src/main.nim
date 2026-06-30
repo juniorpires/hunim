@@ -1,5 +1,5 @@
-import std/[algorithm, sequtils, strformat, strutils, terminal, times, os,
-    osproc, tables, threadpool, mimetypes, xmltree]
+import std/[algorithm, atomics, sequtils, strformat, strutils, terminal,
+    times, os, osproc, tables, typedthreads, mimetypes, xmltree]
 import std/[asynchttpserver, asyncdispatch, uri]
 
 import ./[about, md4c_wrapper]
@@ -657,15 +657,25 @@ type ConvertJob = object
   feedDir: string
   body: string  # Markdown body, frontmatter-stripped and {{ exec }}-expanded
 
-type ConvertResult = tuple[job: ConvertJob, htmlOutput: string]
+type ConvertCtx = object
+  jobs: ptr seq[ConvertJob]
+  results: ptr seq[string]  # HTML output, one slot per job index
+  next: ptr Atomic[int]     # shared cursor: the next job index to claim
 
-proc convertMarkdownWorker(job: ConvertJob): ConvertResult =
-  ## Worker function that converts a Markdown body to HTML. The body has already
-  ## had its {{ exec }} tags expanded (single-threaded, upstream) so a script
-  ## that emits Markdown is rendered as part of the page. Component and variable
-  ## tags are still expanded later, after the template is applied, so that — like
-  ## exec — they are never run inside a code sample.
-  (job, markdown(job.body))
+proc convertMarkdownWorker(ctx: ConvertCtx) {.thread.} =
+  ## Pool worker: claim job indices off the shared `next` cursor and convert each
+  ## Markdown body to HTML, writing the result into that job's own results slot.
+  ## The body has already had its {{ exec }} tags expanded (single-threaded,
+  ## upstream) so a script that emits Markdown is rendered as part of the page.
+  ## Component and variable tags are still expanded later, after the template is
+  ## applied, so that — like exec — they are never run inside a code sample.
+  ## Because each index is written by exactly one worker, the shared seq needs no
+  ## per-element locking.
+  while true:
+    let i = ctx.next[].fetchAdd(1)
+    if i >= ctx.jobs[].len:
+      break
+    ctx.results[][i] = markdown(ctx.jobs[][i].body)
 
 proc expandMarkdown(content: string, context: Table[string, string]): string =
   ## Expand component, {{ .Var }}, and {{ exec }} tags in raw Markdown, leaving
@@ -894,9 +904,6 @@ proc main(doReload: bool) =
   else:
     echo &"Converting {jobs.len} markdown files in parallel..."
 
-    # Process all jobs in parallel
-    var flowVars = newSeq[FlowVar[ConvertResult]](jobs.len)
-
     # Expand {{ exec }} tags on each Markdown body up front, single-threaded, so
     # a script that emits Markdown is converted as part of the page rather than
     # injected as raw text into the already-rendered HTML. Kept out of the
@@ -904,14 +911,23 @@ proc main(doReload: bool) =
     for i in 0 ..< jobs.len:
       jobs[i].body = expandExecInMarkdown(nonFrontmatter(jobs[i].file))
 
-    # Spawn all conversion tasks
-    for i in 0 ..< jobs.len:
-      flowVars[i] = spawn convertMarkdownWorker(jobs[i])
+    # Convert every body to HTML across a small pool of worker threads. Each
+    # worker pulls the next job index off a shared atomic cursor (keeping load
+    # balanced) and writes into its own results slot, so no locking is needed.
+    var results = newSeq[string](jobs.len)
+    var next: Atomic[int]  # zero-initialized
+    var ctx = ConvertCtx(jobs: addr jobs, results: addr results, next: addr next)
 
-    # Wait for all tasks to complete and collect results
-    for flowVar in flowVars:
-      let result = ^flowVar
-      let url = processConvertedMarkdown(result.job, result.htmlOutput)
+    let nThreads = max(1, min(countProcessors(), jobs.len))
+    var threads = newSeq[Thread[ConvertCtx]](nThreads)
+    for i in 0 ..< nThreads:
+      createThread(threads[i], convertMarkdownWorker, ctx)
+    for i in 0 ..< nThreads:
+      joinThread(threads[i])
+
+    # Collect results in job order (matching the previous sitemap ordering).
+    for i in 0 ..< jobs.len:
+      let url = processConvertedMarkdown(jobs[i], results[i])
       if url != "":
         sitemapUrls.add(url)
 
