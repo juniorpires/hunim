@@ -2,7 +2,7 @@ import std/[algorithm, atomics, sequtils, strformat, strutils, terminal,
     times, os, osproc, tables, typedthreads, mimetypes, xmltree]
 import std/[asynchttpserver, asyncdispatch, uri]
 
-import ./[about, md4c_wrapper]
+import ./[about, md4c_wrapper, highlight]
 
 import parsetoml
 
@@ -29,6 +29,9 @@ var buildDrafts = false
 var keepMarkdown = false
 var mdStripFrontmatter = true
 var mdExpandTags = true
+# Build-time syntax highlighting of fenced code blocks (see highlight.nim).
+# Disabled via [highlight] enabled = false, e.g. for a client-side highlighter.
+var highlightCode = true
 
 let reloadScript = """<script>var bfr = '';
   setInterval(function () {
@@ -675,7 +678,10 @@ proc convertMarkdownWorker(ctx: ConvertCtx) {.thread.} =
     let i = ctx.next[].fetchAdd(1)
     if i >= ctx.jobs[].len:
       break
-    ctx.results[][i] = markdown(ctx.jobs[][i].body)
+    # highlightCode is a plain bool set before the pool spawns, so this read
+    # stays gcsafe.
+    let html = markdown(ctx.jobs[][i].body)
+    ctx.results[][i] = (if highlightCode: highlightCodeBlocks(html) else: html)
 
 proc expandMarkdown(content: string, context: Table[string, string]): string =
   ## Expand component, {{ .Var }}, and {{ exec }} tags in raw Markdown, leaving
@@ -854,6 +860,9 @@ proc main(doReload: bool) =
   keepMarkdown = table2{"markdown", "keepSource"}.getBool(false)
   mdStripFrontmatter = table2{"markdown", "stripFrontmatter"}.getBool(true)
   mdExpandTags = table2{"markdown", "expandTags"}.getBool(true)
+
+  # Optional [highlight] table. On unless explicitly disabled.
+  highlightCode = table2{"highlight", "enabled"}.getBool(true)
 
   var sitemapUrls: seq[string] = @[]
   feedRegistry.clear()

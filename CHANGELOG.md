@@ -1,6 +1,7 @@
 # 0.4.0
 
 ## Features
+ - Fenced code blocks are now syntax-highlighted at build time. When a block's info string names a supported language (`nim`, `c`, `cpp`, `csharp`, `java`, `python`, `yaml`), its tokens are wrapped in `<span class="hl-…">` elements during the build, so pages ship pre-colored code with no client-side JavaScript and no flash of unstyled content. The colors come from CSS you provide (classes: `hl-keyword`, `hl-string`, `hl-escape`, `hl-number`, `hl-comment`, `hl-operator`, `hl-preprocessor`, `hl-regex`); a block in an unrecognized or unlabeled language is emitted unchanged. On by default; disable with `[highlight] enabled = false` when the site uses a client-side highlighter such as Prism.js or highlight.js
  - Added an optional `[markdown]` table to `hunim.toml`. With `keepSource = true`, each page's Markdown source is published next to its HTML at the same route with a `.md` extension (e.g. `/getting-started.md`), instead of being deleted after conversion — handy for serving a plain-text / LLM-readable copy of every page. The HTML page advertises this source via `<link rel="alternate" type="text/markdown">` in its `<head>`. `stripFrontmatter` (default true) drops the `---` block, and `expandTags` (default true) runs the component, `{{ .Var }}`, and `{{ exec }}` passes over the body while leaving tags inside code samples (fenced, inline, and `<pre>`/`<code>`) literal
 
 ## Fixes

@@ -9,6 +9,16 @@
   --code-bg: #f5f5f5;
   --pre-bg: #1e1e2e;
   --pre-text: #cdd6f4;
+  /* Syntax-highlight token colors (Catppuccin Mocha; the pre background is dark
+     in both themes, so one palette serves light and dark). */
+  --hl-keyword: #cba6f7;
+  --hl-string: #a6e3a1;
+  --hl-escape: #f5c2e7;
+  --hl-number: #fab387;
+  --hl-comment: #7f849c;
+  --hl-operator: #89dceb;
+  --hl-preprocessor: #f5c2e7;
+  --hl-regex: #f2cdcd;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -175,6 +185,16 @@ pre code {
   font-size: 13.5px;
   color: var(--pre-text);
 }
+
+/* Build-time syntax-highlight tokens emitted by hunim (no client JS). */
+pre code .hl-keyword      { color: var(--hl-keyword); }
+pre code .hl-string       { color: var(--hl-string); }
+pre code .hl-escape       { color: var(--hl-escape); }
+pre code .hl-number       { color: var(--hl-number); }
+pre code .hl-comment      { color: var(--hl-comment); font-style: italic; }
+pre code .hl-operator     { color: var(--hl-operator); }
+pre code .hl-preprocessor { color: var(--hl-preprocessor); }
+pre code .hl-regex        { color: var(--hl-regex); }
 
 table {
   width: 100%;

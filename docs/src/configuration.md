@@ -46,6 +46,19 @@ With `keepSource = true`, a page at `/docs/getting-started` also becomes availab
 
 Drafts are never published as `.md`, and the `.md` renditions are not added to `sitemap.xml`.
 
+## Syntax highlighting
+
+Fenced code blocks are [syntax-highlighted](/syntax-highlighting) at build time by default. Turn it off with the `[highlight]` table — for example when your site ships a client-side highlighter such as Prism.js or highlight.js, which would re-tokenize the same blocks and reintroduce a flash of unstyled code.
+
+```toml
+[highlight]
+enabled = false   # default true
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `enabled` | bool | Wrap code-block tokens in `<span class="hl-…">` during the build. When `false`, blocks are emitted as plain `<pre><code class="language-…">`, ready for a client-side highlighter. |
+
 ## Example
 
 ```toml

@@ -72,5 +72,6 @@ Output is written to `public/`. Deploy the contents of that directory to any sta
 - [Templates](/templates) — build reusable HTML layouts
 - [Frontmatter](/frontmatter) — add titles, dates, and metadata to pages
 - [Components](/components) — create reusable snippets
+- [Syntax Highlighting](/syntax-highlighting) — color code blocks at build time
 - [Feeds](/feeds) — set up a blog with automatic RSS
 - [CLI Reference](/cli) — all commands and flags
