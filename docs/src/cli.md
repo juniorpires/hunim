@@ -30,13 +30,35 @@ hunim server [--buildDrafts]
 ```
 
 - Serves the built site at `http://127.0.0.1:8080`.
-- Watches `src/` for changes and rebuilds automatically.
+- Watches `src/`, `templates/`, `components/`, and `hunim.toml`, and rebuilds only what a change affects:
+  - An edited page rebuilds just that page.
+  - An edited template, component, or exec script rebuilds the pages that (transitively) use it — nothing else.
+  - An edited static asset (CSS, images, …) is re-copied without rebuilding any page.
+  - A change to any page in a feed directory rebuilds that feed (its posts, post list, and RSS).
+  - Adding or deleting files, or editing `hunim.toml`, triggers a full rebuild. `sitemap.xml` is only refreshed on full rebuilds.
 - Injects an auto-reload script into every page (polls every 100 ms); production builds contain no such script.
 - Press `Ctrl+C` to stop.
 
 | Flag | Description |
 |------|-------------|
 | `--buildDrafts` | Include draft pages in the server build. |
+
+---
+
+### `hunim dag`
+
+Serve an interactive diagram of the site's structure as a DAG.
+
+```
+hunim dag
+```
+
+- Serves at `http://127.0.0.1:8081` (a different port than `hunim server`, so both can run at once).
+- Draws every page, template, component, and exec script as a node, with edges for the `template` frontmatter key (including implicit feed templates), component invocations, and exec tags.
+- Hover a node to trace everything it depends on and everything that uses it; click to pin the highlight.
+- A template that is referenced but doesn't exist in `templates/` is flagged as missing.
+- Tags inside code samples are ignored, matching the build.
+- Refresh the browser to rescan the site; no build required.
 
 ---
 

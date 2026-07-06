@@ -1,8 +1,8 @@
-import std/[algorithm, atomics, sequtils, strformat, strutils, terminal,
-    times, os, osproc, tables, typedthreads, mimetypes, xmltree]
+import std/[algorithm, atomics, json, sequtils, sets, strformat, strutils,
+    terminal, times, os, osproc, tables, typedthreads, mimetypes, xmltree]
 import std/[asynchttpserver, asyncdispatch, uri]
 
-import ./[about, md4c_wrapper, highlight]
+import ./[about, md4c_wrapper, highlight, dag]
 
 import parsetoml
 
@@ -32,6 +32,11 @@ var mdExpandTags = true
 # Build-time syntax highlighting of fenced code blocks (see highlight.nim).
 # Disabled via [highlight] enabled = false, e.g. for a client-side highlighter.
 var highlightCode = true
+# Site config from hunim.toml, set by main(). Kept as globals so the dev
+# server's partial rebuilds can convert single pages without re-reading the
+# config (a hunim.toml change always takes the full-rebuild path).
+var siteBaseUrl = ""
+var siteLang = ""
 
 let reloadScript = """<script>var bfr = '';
   setInterval(function () {
@@ -850,11 +855,12 @@ proc main(doReload: bool) =
 
   let table2 = parsetoml.parseFile("hunim.toml")
 
-  let baseUrl = $table2["baseURL"]
-  if not baseUrl.endsWith("/"):
+  siteBaseUrl = $table2["baseURL"]
+  if not siteBaseUrl.endsWith("/"):
     error "baseURL must end with /"
-
-  let lang = $table2["languageCode"]
+  siteLang = $table2["languageCode"]
+  let baseUrl = siteBaseUrl
+  let lang = siteLang
 
   # Optional [markdown] table. Absent keys fall back to the defaults above.
   keepMarkdown = table2{"markdown", "keepSource"}.getBool(false)
@@ -1018,22 +1024,288 @@ proc serveFile(path: string): tuple[code: HttpCode, content: string,
   except IOError:
     return (Http500, "500 Internal Server Error", "text/plain")
 
-proc getLastModTime(dir: string): Time =
-  var lastMod = fromUnix(0)
-  if not dirExists(dir):
-    return lastMod
+# --- Site dependency scanning -------------------------------------------------
+# Shared by `hunim dag` and the dev server's smart rebuilds. Scans src/,
+# templates/, and components/ directly (no build required) into a model of who
+# references whom. The scan mirrors the build's rules — the same template
+# resolution (frontmatter `template`, implicit feed templates, default.html)
+# and the same code-region protection, so tags shown literally in documentation
+# code samples don't count as references.
 
-  for kind, path in walkDir(dir):
-    if kind == pcFile:
-      let info = getFileInfo(path)
-      if info.lastWriteTime > lastMod:
-        lastMod = info.lastWriteTime
-    elif kind == pcDir:
-      let subdirMod = getLastModTime(path)
-      if subdirMod > lastMod:
-        lastMod = subdirMod
+proc looseFrontmatter(file: string): Table[string, string] =
+  ## Lenient counterpart to parseFrontmatter: malformed lines are skipped
+  ## rather than aborting, so the dev/dag servers stay up while a page is
+  ## mid-edit.
+  let lines = readFile(file).splitLines()
+  if lines.len == 0 or lines[0].strip() != "---":
+    return
+  var i = 1
+  while i < lines.len and lines[i].strip() != "---":
+    let colon = lines[i].find(':')
+    if colon != -1:
+      result[lines[i][0 ..< colon].strip()] = lines[i][colon + 1 .. ^1].strip()
+    inc i
 
-  return lastMod
+proc nonCodeText(content: string, isMd: bool): string =
+  ## The text with code regions removed, so tags the build leaves literal
+  ## (documentation code samples) don't count as references.
+  if isMd:
+    for seg in mdCodeSegments(content):
+      if not seg.isCode: result &= seg.text
+  else:
+    for seg in codeSegments(content):
+      if not seg.isCode: result &= seg.text
+
+proc findComponentRefs(text: string, names: seq[string]): seq[string] =
+  for name in names:
+    let pat = "{{ " & name
+    var idx = 0
+    while true:
+      let f = text.find(pat, idx)
+      if f == -1:
+        break
+      # Require a space after the name so `nav` doesn't match `{{ navbar }}`.
+      if f + pat.len < text.len and text[f + pat.len] == ' ':
+        result.add(name)
+        break
+      idx = f + 1
+
+proc findExecRefs(text: string): seq[string] =
+  var idx = 0
+  while true:
+    let openIdx = text.find("{{ exec ", idx)
+    if openIdx == -1:
+      return
+    let closeIdx = text.find(" }}", openIdx)
+    if closeIdx == -1:
+      return
+    let name = text[openIdx + 8 .. closeIdx - 1].strip()
+    if name.endsWith(".nims") and name notin result:
+      result.add(name)
+    idx = closeIdx + 3
+
+type
+  TagRefs = tuple[comps, scripts: seq[string]]
+  PageScan = object
+    path: string         # src path, e.g. "src/blog/post.md"
+    templateFile: string # resolved template filename; "" for raw .html pages
+    refs: TagRefs
+    feedDir: string      # the .md page's src feed directory, or ""
+  SiteScan = object
+    compNames: seq[string]
+    compPaths: Table[string, string] # component name -> source file path
+    scriptNames: seq[string]         # e.g. "version.nims"
+    templateNames: seq[string]
+    compRefs: Table[string, TagRefs] # keyed by component name
+    tmplRefs: Table[string, TagRefs] # keyed by template filename
+    pages: seq[PageScan]
+
+proc scanTagRefs(text: string, compNames: seq[string]): TagRefs =
+  (comps: findComponentRefs(text, compNames), scripts: findExecRefs(text))
+
+proc scanSite(): SiteScan =
+  var s = SiteScan()
+
+  if dirExists("components"):
+    for kind, path in walkDir("components"):
+      let path = toUnixPath(path)
+      let fname = path.extractFilename()
+      if kind != pcFile or fname.startsWith("."):
+        continue
+      if fname.endsWith(".nims"):
+        s.scriptNames.add(fname)
+      else:
+        let name = fname.changeFileExt("")
+        s.compNames.add(name)
+        s.compPaths[name] = path
+
+  if dirExists("templates"):
+    for kind, path in walkDir("templates"):
+      let fname = toUnixPath(path).extractFilename()
+      if kind == pcFile and not fname.startsWith("."):
+        s.templateNames.add(fname)
+
+  for c in s.compNames:
+    var refs = scanTagRefs(
+        nonCodeText(readFile(s.compPaths[c]), isMd = false), s.compNames)
+    refs.comps = refs.comps.filterIt(it != c)
+    s.compRefs[c] = refs
+
+  for t in s.templateNames:
+    s.tmplRefs[t] = scanTagRefs(
+        nonCodeText(readFile("templates" / t), isMd = false), s.compNames)
+
+  proc walkPages(dir: string, isFeed: bool) =
+    for kind, path in walkDir(dir):
+      let path = toUnixPath(path)
+      if kind == pcFile:
+        let ext = path.splitFile().ext.toLowerAscii()
+        if ext notin [".md", ".html"]:
+          continue
+        var page = PageScan(path: path)
+        let isMd = ext == ".md"
+        page.refs = scanTagRefs(nonCodeText(readFile(path), isMd), s.compNames)
+        if isMd:
+          if isFeed:
+            page.feedDir = dir
+          page.templateFile =
+            looseFrontmatter(path).getOrDefault("template", "default.html")
+          if isFeed and not path.endsWith("index.md"):
+            let implicit = dir.split('/')[^1] & "_list.html"
+            if implicit in s.templateNames:
+              page.templateFile = implicit
+        s.pages.add(page)
+      elif kind == pcDir:
+        let indexFile = path / "index.md"
+        var isFeed2 = false
+        if fileExists(indexFile):
+          isFeed2 = looseFrontmatter(indexFile).getOrDefault("type", "") == "feed"
+        walkPages(path, isFeed2)
+
+  if dirExists("src"):
+    walkPages("src", false)
+  return s
+
+proc reverseDeps(scan: SiteScan): Table[string, HashSet[string]] =
+  ## Map each template, component, and script source file to the set of src
+  ## pages that transitively depend on it.
+  var compClosure = initTable[string, HashSet[string]]()
+
+  proc closureOf(c: string, stack: var seq[string]): HashSet[string] =
+    ## All files component `c` pulls in: its own file, its scripts, and the
+    ## closures of the components it references (cycle-safe).
+    if compClosure.hasKey(c):
+      return compClosure[c]
+    if c in stack:
+      return initHashSet[string]()
+    stack.add(c)
+    var files = initHashSet[string]()
+    files.incl(scan.compPaths[c])
+    for sc in scan.compRefs[c].scripts:
+      files.incl("components/" & sc)
+    for c2 in scan.compRefs[c].comps:
+      files.incl(closureOf(c2, stack))
+    discard stack.pop()
+    compClosure[c] = files
+    return files
+
+  proc filesFor(refs: TagRefs): HashSet[string] =
+    var stack: seq[string] = @[]
+    for c in refs.comps:
+      result.incl(closureOf(c, stack))
+    for sc in refs.scripts:
+      result.incl("components/" & sc)
+
+  for page in scan.pages:
+    var files = filesFor(page.refs)
+    if page.templateFile in scan.tmplRefs:
+      files.incl("templates/" & page.templateFile)
+      files.incl(filesFor(scan.tmplRefs[page.templateFile]))
+    for f in files:
+      result.mgetOrPut(f, initHashSet[string]()).incl(page.path)
+
+proc feedDirOf(srcPage: string): string =
+  ## The src feed directory an .md page belongs to ("" when none): pages
+  ## directly inside a dir whose index.md declares `type: feed`, including
+  ## that index.md itself.
+  if not srcPage.endsWith(".md"):
+    return ""
+  let dir = srcPage.parentDir
+  let indexFile = dir / "index.md"
+  if fileExists(indexFile) and
+      looseFrontmatter(indexFile).getOrDefault("type", "") == "feed":
+    return dir
+  return ""
+
+# --- `hunim dag` -------------------------------------------------------------
+# Serves a page that draws the scanned site model as a DAG diagram:
+# pages -> templates -> components -> exec scripts.
+
+proc buildDagJson(siteTitle: string): string =
+  let scan = scanSite()
+
+  var nodes = newJArray()
+  var edges = newJArray()
+  var nodeSeen = initTable[string, bool]()
+  var edgeSeen = initTable[string, bool]()
+
+  proc addNode(id, label, kind: string, file = "", missing = false) =
+    if nodeSeen.hasKeyOrPut(id, true):
+      return
+    var n = %*{"id": id, "label": label, "kind": kind}
+    if file != "":
+      n["file"] = %file
+    if missing:
+      n["missing"] = %true
+    nodes.add(n)
+
+  proc addEdge(src, dst: string) =
+    if edgeSeen.hasKeyOrPut(src & " -> " & dst, true):
+      return
+    edges.add(%*{"from": src, "to": dst})
+
+  proc addRefEdges(srcId: string, refs: TagRefs) =
+    for c in refs.comps:
+      addEdge(srcId, "c:" & c)
+    for sc in refs.scripts:
+      addNode("s:" & sc, sc, "script", file = "components/" & sc,
+          missing = sc notin scan.scriptNames)
+      addEdge(srcId, "s:" & sc)
+
+  for t in scan.templateNames:
+    addNode("t:" & t, t, "template", file = "templates/" & t)
+    addRefEdges("t:" & t, scan.tmplRefs[t])
+
+  for c in scan.compNames:
+    addNode("c:" & c, c, "component", file = scan.compPaths[c])
+    addRefEdges("c:" & c, scan.compRefs[c])
+
+  for sc in scan.scriptNames:
+    addNode("s:" & sc, sc, "script", file = "components/" & sc)
+
+  for page in scan.pages:
+    let rel = page.path[4 .. ^1] # strip the leading "src/"
+    let id = "p:" & rel
+    addNode(id, rel, "page", file = page.path)
+    addRefEdges(id, page.refs)
+    if page.templateFile != "":
+      addNode("t:" & page.templateFile, page.templateFile, "template",
+          file = "templates/" & page.templateFile,
+          missing = page.templateFile notin scan.templateNames)
+      addEdge(id, "t:" & page.templateFile)
+
+  return $(%*{"title": siteTitle, "nodes": nodes, "edges": edges})
+
+proc dagServer() =
+  let port = 8081
+  let address = "127.0.0.1"
+
+  # Read the site title up front: parsetoml isn't GC-safe, so it can't be
+  # called from the async request handler.
+  var siteTitle = ""
+  try:
+    siteTitle = parsetoml.parseFile("hunim.toml").getOrDefault("title").getStr("")
+  except CatchableError:
+    discard
+
+  var httpServer = newAsyncHttpServer()
+
+  proc handleRequest(req: Request) {.async.} =
+    if req.url.path in ["", "/", "/index.html"]:
+      # Rebuild the graph on every request, so refreshing the browser reflects
+      # the current state of src/, templates/, and components/.
+      let page = dagPage(buildDagJson(siteTitle))
+      await req.respond(Http200, page,
+          newHttpHeaders([("Content-Type", "text/html; charset=utf-8")]))
+    else:
+      await req.respond(Http404, "404 Not Found",
+          newHttpHeaders([("Content-Type", "text/plain")]))
+
+  stdout.styledWriteLine(fgGreen, &"DAG viewer running at http://{address}:{port}/")
+  stdout.styledWriteLine(fgYellow, "Press Ctrl+C to stop")
+  stdout.resetAttributes()
+
+  waitFor httpServer.serve(Port(port), handleRequest, address)
 
 proc rebuild(doReload: bool) =
   stdout.styledWriteLine(fgCyan, "Rebuilding site...")
@@ -1044,12 +1316,165 @@ proc rebuild(doReload: bool) =
     stderr.styledWriteLine(fgRed, "Build failed: " & getCurrentExceptionMsg())
     stderr.resetAttributes()
 
+# --- Smart rebuilds for `hunim server` ----------------------------------------
+# Instead of rebuilding the whole site on any change under src/, the watcher
+# snapshots every build input (hunim.toml, src/, templates/, components/) and
+# rebuilds only what a change actually affects: a page rebuilds itself, a
+# template/component/script rebuilds the pages that transitively use it (via
+# reverseDeps), and a static asset is just re-copied. Additions, removals, and
+# hunim.toml changes restructure the site (routes, feed membership, the
+# dependency graph itself), so those take the full-rebuild path. Partial
+# rebuilds leave sitemap.xml untouched; it refreshes on the next full rebuild.
+
+proc snapshotInputs(): Table[string, Time] =
+  ## Modification times of every build input.
+  if fileExists("hunim.toml"):
+    result["hunim.toml"] = getFileInfo("hunim.toml").lastWriteTime
+
+  proc walk(dir: string, snap: var Table[string, Time]) =
+    for kind, path in walkDir(dir):
+      if kind == pcFile:
+        snap[toUnixPath(path)] = getFileInfo(path).lastWriteTime
+      elif kind == pcDir:
+        walk(path, snap)
+
+  for dir in ["src", "templates", "components"]:
+    if dirExists(dir):
+      walk(dir, result)
+
+proc convertSingle(job: ConvertJob) =
+  ## Convert one Markdown job synchronously and finish its page (template,
+  ## components, clean URL). Partial rebuilds touch a handful of pages, so no
+  ## thread pool is needed.
+  let html = markdown(job.body)
+  discard processConvertedMarkdown(job,
+      if highlightCode: highlightCodeBlocks(html) else: html)
+  discard processFile(job.path, job.baseUrl, job.doReload, job.lang)
+
+proc removeStaleOutputs(pubMd: string) =
+  ## Drop the pages a previous build may have generated for a now-draft .md
+  ## source. (Like the full build, the source copy itself stays in public/.)
+  removeFile(pubMd.changeFileExt("html"))
+  removeFile(pubMd.changeFileExt(""))
+
+proc rebuildSrcPage(srcPath: string) =
+  ## Rebuild a single non-feed page from its src file, mirroring what the full
+  ## build produces for it.
+  let pubPath = "public" & srcPath[3 .. ^1]
+  createDir(pubPath.parentDir)
+  copyFile(srcPath, pubPath)
+  if pubPath.endsWith(".md"):
+    if not buildDrafts and
+        looseFrontmatter(pubPath).getOrDefault("draft", "false") == "true":
+      removeStaleOutputs(pubPath)
+      return
+    var job = ConvertJob(doReload: true, baseUrl: siteBaseUrl, lang: siteLang,
+        file: pubPath, path: pubPath.changeFileExt("html"), feedDir: "")
+    job.body = expandExecInMarkdown(nonFrontmatter(pubPath))
+    convertSingle(job)
+  else:
+    discard processFile(pubPath, siteBaseUrl, true, siteLang)
+
+proc rebuildFeedDir(srcDir: string) =
+  ## Rebuild a feed directory wholesale: a change to any post also changes the
+  ## feed's RSS and the index page's post list, so redo the whole directory.
+  let pubDir = "public" & srcDir[3 .. ^1]
+  createDir(pubDir)
+  var mdFiles: seq[string] = @[]
+  for f in walkFiles(srcDir / "*.md"):
+    let f = toUnixPath(f)
+    let dest = toUnixPath(pubDir / f.extractFilename())
+    copyFile(f, dest)
+    mdFiles.add(dest)
+
+  let frontmatter = looseFrontmatter(pubDir / "index.md")
+  let posts = collectPosts(siteBaseUrl, pubDir)
+  generateRSSFeed(frontmatter, siteLang, siteBaseUrl,
+      toUnixPath(pubDir / "index.xml"), posts)
+  feedRegistry[pubDir] = frontmatter.getOrDefault("title", "RSS Feed")
+  feedPostLists[pubDir] = generatePostList(siteBaseUrl, posts)
+
+  for f in mdFiles:
+    if not buildDrafts and
+        looseFrontmatter(f).getOrDefault("draft", "false") == "true":
+      removeStaleOutputs(f)
+      continue
+    var job = ConvertJob(doReload: true, baseUrl: siteBaseUrl, lang: siteLang,
+        file: f, path: f.changeFileExt("html"),
+        feedDir: (if f.endsWith("index.md"): "" else: pubDir))
+    job.body = expandExecInMarkdown(nonFrontmatter(f))
+    convertSingle(job)
+
+proc smartRebuild(added, removed, modified: seq[string]) =
+  if added.len > 0 or removed.len > 0 or "hunim.toml" in modified:
+    rebuild(doReload = true)
+    return
+
+  var pages = initHashSet[string]()
+  var assets: seq[string] = @[]
+  var depFiles: seq[string] = @[]
+  for f in modified:
+    if f.startsWith("src/"):
+      if f.splitFile().ext.toLowerAscii() in [".md", ".html"]:
+        pages.incl(f)
+      else:
+        assets.add(f)
+    else:
+      depFiles.add(f)
+
+  if depFiles.len > 0:
+    let rev = reverseDeps(scanSite())
+    for f in depFiles:
+      # A changed script's cached output is stale; drop it so its dependents
+      # re-run it.
+      if f.endsWith(".nims"):
+        execCache.del(f.extractFilename())
+      for p in rev.getOrDefault(f):
+        pages.incl(p)
+
+  try:
+    for a in assets:
+      let dest = "public" & a[3 .. ^1]
+      createDir(dest.parentDir)
+      copyFile(a, dest)
+    if assets.len > 0:
+      stdout.styledWriteLine(fgCyan, &"Copied {assets.len} static file(s)")
+      stdout.resetAttributes()
+
+    if pages.len == 0:
+      return
+
+    var feedDirs = initHashSet[string]()
+    var singles: seq[string] = @[]
+    for p in pages:
+      let fd = feedDirOf(p)
+      if fd != "":
+        feedDirs.incl(fd)
+      else:
+        singles.add(p)
+
+    var what = &"{singles.len} page(s)"
+    if feedDirs.len > 0:
+      what &= &" and {feedDirs.len} feed(s)"
+    stdout.styledWriteLine(fgCyan, &"Rebuilding {what}...")
+    stdout.resetAttributes()
+
+    loadTemplates()
+    loadComponents()
+    for d in feedDirs:
+      rebuildFeedDir(d)
+    for p in singles:
+      rebuildSrcPage(p)
+  except CatchableError:
+    stderr.styledWriteLine(fgRed, "Rebuild failed: " & getCurrentExceptionMsg())
+    stderr.resetAttributes()
+
 proc server() =
   let port = 8080
   let address = "127.0.0.1"
 
   var httpServer = newAsyncHttpServer()
-  var lastModTime = getLastModTime("src")
+  var snapshot = snapshotInputs()
 
   proc handleRequest(req: Request) {.async.} =
     var path = req.url.path.decodeUrl()
@@ -1092,10 +1517,20 @@ proc server() =
   proc checkForChanges {.async.} =
     while true:
       await sleepAsync(100) # 0.1sec
-      let currentModTime = getLastModTime("src")
-      if currentModTime > lastModTime:
-        lastModTime = currentModTime
-        rebuild(true)
+      let current = snapshotInputs()
+      if current == snapshot:
+        continue
+      var added, removed, modified: seq[string]
+      for path, mtime in current:
+        if path notin snapshot:
+          added.add(path)
+        elif snapshot[path] != mtime:
+          modified.add(path)
+      for path in snapshot.keys:
+        if path notin current:
+          removed.add(path)
+      snapshot = current
+      smartRebuild(added, removed, modified)
 
   stdout.styledWriteLine(fgGreen, &"Server running at http://{address}:{port}/")
   stdout.styledWriteLine(fgYellow, "Press Ctrl+C to stop")
@@ -1128,5 +1563,7 @@ when isMainModule:
   elif cmd == "server":
     rebuild(doReload=true)
     server()
+  elif cmd == "dag":
+    dagServer()
   else:
     error &"Unknown command: {cmd}"
