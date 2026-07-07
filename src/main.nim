@@ -414,6 +414,36 @@ proc renderTemplate(templateContent: string, context: Table[string,
       rebuilt &= (if seg.isCode: seg.text else: seg.text.replace(tag, value))
     result = rebuilt
 
+proc validateExecScriptName(scriptName: string) =
+  if not scriptName.endsWith(".nims"):
+    error &"exec script must end with .nims: {scriptName}"
+  for c in scriptName[0..^6]:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-'}:
+      error &"exec script name contains invalid characters: {scriptName}"
+
+proc runNimScript(scriptName: string): string =
+  validateExecScriptName(scriptName)
+  let scriptPath = "components" / scriptName
+  if not fileExists(scriptPath):
+    error &"NimScript not found: {scriptPath}"
+
+  let (output, exitCode) = execCmdEx(
+      "nim e --hints:off " & quoteShell(scriptPath))
+  if exitCode != 0:
+    error &"NimScript failed ({scriptName}):\n{output}"
+  return output.strip()
+
+proc execScriptOutput(scriptName: string): string =
+  ## Run a NimScript component at most once per build. Later references reuse
+  ## the cached stdout, including references expanded during page workers.
+  validateExecScriptName(scriptName)
+  if execCache.hasKey(scriptName):
+    return execCache[scriptName]
+
+  result = runNimScript(scriptName)
+  execCache[scriptName] = result
+  echo &"Running: components/{scriptName}"
+
 proc processExecTagsSegment(content: string): string =
   var newContent = content
   var startIdx = 0
@@ -428,28 +458,7 @@ proc processExecTagsSegment(content: string): string =
 
     let scriptName = newContent[openIdx + 8 .. closeIdx - 1].strip()
 
-    if not scriptName.endsWith(".nims"):
-      error &"exec script must end with .nims: {scriptName}"
-    for c in scriptName[0..^6]:
-      if c notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-'}:
-        error &"exec script name contains invalid characters: {scriptName}"
-
-    var trimmed: string
-    if execCache.hasKey(scriptName):
-      trimmed = execCache[scriptName]
-    else:
-      let scriptPath = "components" / scriptName
-
-      if not fileExists(scriptPath):
-        error &"NimScript not found: {scriptPath}"
-
-      let (output, exitCode) = execCmdEx(
-          "nim e --hints:off " & quoteShell(scriptPath))
-      if exitCode != 0:
-        error &"NimScript failed ({scriptName}):\n{output}"
-
-      trimmed = output.strip()
-      execCache[scriptName] = trimmed
+    let trimmed = execScriptOutput(scriptName)
 
     let fullMatch = newContent[openIdx .. closeIdx + 2]
     newContent = newContent.replace(fullMatch, trimmed)
@@ -743,18 +752,62 @@ type ConvertJob = object
   feedDir: string
   body: string  # Markdown body, frontmatter-stripped and {{ exec }}-expanded
 
+type PageResult = object
+  html: string
+  sitemapUrl: string
+  keepMarkdown: bool
+
 type ConvertCtx = object
   jobs: ptr seq[ConvertJob]
-  results: ptr seq[string]  # HTML output, one slot per job index
+  results: ptr seq[PageResult] # Rendered output, one slot per job index
   next: ptr Atomic[int]     # shared cursor: the next job index to claim
 
+type ExecResult = object
+  output: string
+  error: string
+
+type ExecCtx = object
+  scripts: ptr seq[string]
+  results: ptr seq[ExecResult]
+  next: ptr Atomic[int]
+
+proc renderConvertedMarkdown(job: ConvertJob, htmlOutput: string): PageResult
+
+proc runNimScriptWorker(ctx: ExecCtx) {.thread.} =
+  while true:
+    let i = ctx.next[].fetchAdd(1)
+    if i >= ctx.scripts[].len:
+      break
+    try:
+      ctx.results[][i].output = runNimScript(ctx.scripts[][i])
+    except CatchableError:
+      ctx.results[][i].error = getCurrentExceptionMsg()
+
+proc runNimScriptsParallel(scripts: seq[string]): seq[ExecResult] =
+  ## Run NimScript leaves concurrently. Each worker writes only its claimed
+  ## result slot; the main thread populates execCache after all scripts finish.
+  result = newSeq[ExecResult](scripts.len)
+  if scripts.len == 0:
+    return
+
+  var scriptJobs = scripts
+  var next: Atomic[int]
+  var ctx = ExecCtx(scripts: addr scriptJobs, results: addr result,
+      next: addr next)
+
+  let nThreads = max(1, min(countProcessors(), scripts.len))
+  var threads = newSeq[Thread[ExecCtx]](nThreads)
+  for i in 0 ..< nThreads:
+    createThread(threads[i], runNimScriptWorker, ctx)
+  for i in 0 ..< nThreads:
+    joinThread(threads[i])
+
 proc convertMarkdownWorker(ctx: ConvertCtx) {.thread.} =
-  ## Pool worker: claim job indices off the shared `next` cursor and convert each
-  ## Markdown body to HTML, writing the result into that job's own results slot.
+  ## Pool worker: claim job indices off the shared `next` cursor and render each
+  ## Markdown page, writing the result into that job's own results slot.
   ## The body has already had its {{ exec }} tags expanded (single-threaded,
   ## upstream) so a script that emits Markdown is rendered as part of the page.
-  ## Component and variable tags are still expanded later, after the template is
-  ## applied, so that — like exec — they are never run inside a code sample.
+  ## File writes/removals still happen later on the main thread, in job order.
   ## Because each index is written by exactly one worker, the shared seq needs no
   ## per-element locking.
   while true:
@@ -764,7 +817,26 @@ proc convertMarkdownWorker(ctx: ConvertCtx) {.thread.} =
     # highlightCode is a plain bool set before the pool spawns, so this read
     # stays gcsafe.
     let html = markdown(ctx.jobs[][i].body)
-    ctx.results[][i] = (if highlightCode: highlightCodeBlocks(html) else: html)
+    {.cast(gcsafe).}:
+      ctx.results[][i] = renderConvertedMarkdown(ctx.jobs[][i],
+          if highlightCode: highlightCodeBlocks(html) else: html)
+
+proc renderMarkdownPages(jobs: var seq[ConvertJob]): seq[PageResult] =
+  ## Render Markdown jobs across a bounded worker pool. The atomic cursor keeps
+  ## load balanced when pages differ greatly in size or highlighting cost.
+  result = newSeq[PageResult](jobs.len)
+  if jobs.len == 0:
+    return
+
+  var next: Atomic[int]  # zero-initialized
+  var ctx = ConvertCtx(jobs: addr jobs, results: addr result, next: addr next)
+
+  let nThreads = max(1, min(countProcessors(), jobs.len))
+  var threads = newSeq[Thread[ConvertCtx]](nThreads)
+  for i in 0 ..< nThreads:
+    createThread(threads[i], convertMarkdownWorker, ctx)
+  for i in 0 ..< nThreads:
+    joinThread(threads[i])
 
 proc expandMarkdown(content: string, context: Table[string, string]): string =
   ## Expand component, {{ .Var }}, and {{ exec }} tags in raw Markdown, leaving
@@ -787,10 +859,10 @@ proc expandMarkdown(content: string, context: Table[string, string]): string =
   for seg in mdCodeSegments(c):
     result &= (if seg.isCode: seg.text else: processExecTagsSegment(seg.text))
 
-proc writeMarkdownSource(job: ConvertJob, frontmatter: Table[string, string]) =
-  ## Publish the page's Markdown rendition at its route. The source already sits
-  ## at job.file — the same path the HTML is served from, with a .md extension —
-  ## so we overwrite it in place rather than deleting it after conversion.
+proc renderMarkdownSource(job: ConvertJob,
+    frontmatter: Table[string, string]): string =
+  ## Build the page's published Markdown rendition. The caller writes it at
+  ## job.file during the serial filesystem commit phase.
   var body =
     if mdStripFrontmatter: nonFrontmatter(job.file)
     else: readFile(job.file)
@@ -804,9 +876,9 @@ proc writeMarkdownSource(job: ConvertJob, frontmatter: Table[string, string]) =
       if frontmatter.hasKey("author"):
         context["Author"] = frontmatter["author"]
     body = expandMarkdown(body, context)
-  writeFile(job.file, body)
+  return body
 
-proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
+proc renderConvertedMarkdown(job: ConvertJob, htmlOutput: string): PageResult =
   let frontmatter = parseFrontmatter(job.file)
   var templateFile = ""
 
@@ -884,8 +956,6 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
       job.baseUrl & job.path.replace("public/", "").replace(".html", ".md"))
     metaTags &= &"\n  <link rel=\"alternate\" type=\"text/markdown\" href=\"{mdUrl}\">"
 
-  let f = open(job.path, fmWrite)
-
   if useTemplate:
     # Use cached template instead of reading from disk
     if not templateCache.hasKey(templateFile):
@@ -904,18 +974,22 @@ proc processConvertedMarkdown(job: ConvertJob, htmlOutput: string): string =
     context["Lang"] = job.lang
     context["MetaTags"] = metaTags
 
-    let renderedHtml = processExecTags(renderTemplate(templateContent, context))
-    f.write(renderedHtml)
+    result.html = renderTemplate(templateContent, context)
   else:
     error "Expected template file"
 
-  f.close()
-  if keepMarkdown:
-    writeMarkdownSource(job, frontmatter)
+  result.sitemapUrl = sitemapUrl
+  result.keepMarkdown = keepMarkdown
+
+proc commitPageResult(job: ConvertJob, page: PageResult) =
+  ## Write/remove files in a deterministic serial phase. Rendering may happen in
+  ## workers, but filesystem changes stay ordered and race-free.
+  writeFile(job.path, page.html)
+  if page.keepMarkdown:
+    let frontmatter = parseFrontmatter(job.file)
+    writeFile(job.file, renderMarkdownSource(job, frontmatter))
   else:
     removeFile(job.file)
-
-  return sitemapUrl
 
 # --- Site dependency scanning -------------------------------------------------
 # Shared by `hunim dag`, the dev server's smart rebuilds, and the build's
@@ -1022,6 +1096,72 @@ proc scanSite(): SiteScan =
     walkPages("src", false)
   return s
 
+type BuildNodes = object
+  count: int
+  scripts: seq[string]
+
+proc srcPathForJob(job: ConvertJob): string =
+  ## Convert a copied public Markdown job path back to its src path so it can be
+  ## matched against the dependency scan.
+  if job.file.startsWith("public/"):
+    return "src/" & job.file[7 .. ^1]
+  return job.file
+
+proc buildNodesFor(scan: SiteScan, jobs: seq[ConvertJob]): BuildNodes =
+  ## Count the reachable build nodes for this build and collect leaf NimScript
+  ## components. Pages are the Markdown jobs that will render; templates,
+  ## components, and scripts are only counted when those pages reach them.
+  var pages = initTable[string, PageScan]()
+  for page in scan.pages:
+    pages[page.path] = page
+
+  var usedComps = initHashSet[string]()
+  var usedTmpls = initHashSet[string]()
+  var usedScripts = initHashSet[string]()
+
+  proc markRefs(refs: TagRefs) =
+    for sc in refs.scripts:
+      usedScripts.incl(sc)
+    for c in refs.comps:
+      if not usedComps.containsOrIncl(c) and c in scan.compRefs:
+        markRefs(scan.compRefs[c])
+
+  var pageCount = jobs.len
+  for job in jobs:
+    let srcPath = srcPathForJob(job)
+    if srcPath notin pages:
+      continue
+    let page = pages[srcPath]
+    markRefs(page.refs)
+    if page.templateFile in scan.tmplRefs:
+      usedTmpls.incl(page.templateFile)
+      markRefs(scan.tmplRefs[page.templateFile])
+
+  for page in scan.pages:
+    if page.path.splitFile().ext.toLowerAscii() == ".html":
+      inc pageCount
+      markRefs(page.refs)
+
+  result.count = pageCount + usedComps.len + usedTmpls.len + usedScripts.len
+  result.scripts = toSeq(usedScripts)
+  result.scripts.sort()
+
+proc handleNimScriptLeaves(nodes: BuildNodes) =
+  ## NimScript components have no Hunim dependencies and can be handled before
+  ## page workers start. They run concurrently, then the main thread records
+  ## their outputs in execCache so later tag expansion is read-only/cache-backed.
+  var pending: seq[string] = @[]
+  for scriptName in nodes.scripts:
+    if not execCache.hasKey(scriptName):
+      pending.add(scriptName)
+      echo &"Running: components/{scriptName}"
+
+  let results = runNimScriptsParallel(pending)
+  for i, scriptName in pending:
+    if results[i].error != "":
+      error results[i].error
+    execCache[scriptName] = results[i].output
+
 proc reverseDeps(scan: SiteScan): Table[string, HashSet[string]] =
   ## Map each template, component, and script source file to the set of src
   ## pages that transitively depend on it.
@@ -1073,11 +1213,10 @@ proc feedDirOf(srcPage: string): string =
     return dir
   return ""
 
-proc warnUnused() =
+proc warnUnused(scan: SiteScan) =
   ## Warn about templates, components, and exec scripts no page reaches: a
   ## template no page resolves to, or a component/script not referenced by any
   ## page, used template, or transitively used component.
-  let scan = scanSite()
   var usedComps = initHashSet[string]()
   var usedTmpls = initHashSet[string]()
   var usedScripts = initHashSet[string]()
@@ -1118,7 +1257,8 @@ proc main(doReload: bool) =
   # Load templates and components into cache at startup
   loadTemplates()
   loadComponents()
-  warnUnused()
+  let siteScan = scanSite()
+  warnUnused(siteScan)
 
   let table2 = parsetoml.parseFile("hunim.toml")
 
@@ -1184,7 +1324,9 @@ proc main(doReload: bool) =
   if jobs.len == 0:
     echo "No markdown files to convert"
   else:
-    echo &"Converting {jobs.len} markdown files in parallel..."
+    let nodes = buildNodesFor(siteScan, jobs)
+    echo &"Converting {nodes.count} nodes in parallel..."
+    handleNimScriptLeaves(nodes)
 
     # Expand {{ exec }} tags on each Markdown body up front, single-threaded, so
     # a script that emits Markdown is converted as part of the page rather than
@@ -1193,25 +1335,16 @@ proc main(doReload: bool) =
     for i in 0 ..< jobs.len:
       jobs[i].body = expandExecInMarkdown(nonFrontmatter(jobs[i].file))
 
-    # Convert every body to HTML across a small pool of worker threads. Each
-    # worker pulls the next job index off a shared atomic cursor (keeping load
-    # balanced) and writes into its own results slot, so no locking is needed.
-    var results = newSeq[string](jobs.len)
-    var next: Atomic[int]  # zero-initialized
-    var ctx = ConvertCtx(jobs: addr jobs, results: addr results, next: addr next)
+    # Render every page across a small pool of worker threads. Each worker pulls
+    # the next job index off a shared atomic cursor (keeping load balanced) and
+    # writes into its own results slot, so no locking is needed.
+    let results = renderMarkdownPages(jobs)
 
-    let nThreads = max(1, min(countProcessors(), jobs.len))
-    var threads = newSeq[Thread[ConvertCtx]](nThreads)
-    for i in 0 ..< nThreads:
-      createThread(threads[i], convertMarkdownWorker, ctx)
-    for i in 0 ..< nThreads:
-      joinThread(threads[i])
-
-    # Collect results in job order (matching the previous sitemap ordering).
+    # Commit results in job order (matching the previous sitemap ordering).
     for i in 0 ..< jobs.len:
-      let url = processConvertedMarkdown(jobs[i], results[i])
-      if url != "":
-        sitemapUrls.add(url)
+      commitPageResult(jobs[i], results[i])
+      if results[i].sitemapUrl != "":
+        sitemapUrls.add(results[i].sitemapUrl)
 
 
   processDirectory("public", baseUrl, sitemapUrls, doReload, lang) # Handle components
@@ -1422,9 +1555,25 @@ proc convertSingle(job: ConvertJob) =
   ## components, clean URL). Partial rebuilds touch a handful of pages, so no
   ## thread pool is needed.
   let html = markdown(job.body)
-  discard processConvertedMarkdown(job,
+  let page = renderConvertedMarkdown(job,
       if highlightCode: highlightCodeBlocks(html) else: html)
+  commitPageResult(job, page)
   discard processFile(job.path, job.baseUrl, job.doReload, job.lang)
+
+proc convertBatch(jobs: var seq[ConvertJob]) =
+  ## Convert a partial-rebuild batch. One page stays synchronous to avoid thread
+  ## overhead; larger batches use the same worker pool as full builds.
+  if jobs.len == 0:
+    return
+  if jobs.len == 1:
+    convertSingle(jobs[0])
+    return
+
+  let results = renderMarkdownPages(jobs)
+  for i in 0 ..< jobs.len:
+    commitPageResult(jobs[i], results[i])
+    discard processFile(jobs[i].path, jobs[i].baseUrl, jobs[i].doReload,
+        jobs[i].lang)
 
 proc removeStaleOutputs(pubMd: string) =
   ## Drop the pages a previous build may have generated for a now-draft .md
@@ -1432,23 +1581,26 @@ proc removeStaleOutputs(pubMd: string) =
   removeFile(pubMd.changeFileExt("html"))
   removeFile(pubMd.changeFileExt(""))
 
-proc rebuildSrcPage(srcPath: string) =
-  ## Rebuild a single non-feed page from its src file, mirroring what the full
-  ## build produces for it.
-  let pubPath = "public" & srcPath[3 .. ^1]
-  createDir(pubPath.parentDir)
-  copyFile(srcPath, pubPath)
-  if pubPath.endsWith(".md"):
-    if not buildDrafts and
-        looseFrontmatter(pubPath).getOrDefault("draft", "false") == "true":
-      removeStaleOutputs(pubPath)
-      return
-    var job = ConvertJob(doReload: true, baseUrl: siteBaseUrl, lang: siteLang,
-        file: pubPath, path: pubPath.changeFileExt("html"), feedDir: "")
-    job.body = expandExecInMarkdown(nonFrontmatter(pubPath))
-    convertSingle(job)
-  else:
-    discard processFile(pubPath, siteBaseUrl, true, siteLang)
+proc rebuildSrcPages(srcPaths: seq[string]) =
+  ## Rebuild standalone src pages. Markdown pages are batched so a template or
+  ## component change affecting many pages can reuse the worker pool.
+  var jobs: seq[ConvertJob] = @[]
+  for srcPath in srcPaths:
+    let pubPath = "public" & srcPath[3 .. ^1]
+    createDir(pubPath.parentDir)
+    copyFile(srcPath, pubPath)
+    if pubPath.endsWith(".md"):
+      if not buildDrafts and
+          looseFrontmatter(pubPath).getOrDefault("draft", "false") == "true":
+        removeStaleOutputs(pubPath)
+        continue
+      var job = ConvertJob(doReload: true, baseUrl: siteBaseUrl, lang: siteLang,
+          file: pubPath, path: pubPath.changeFileExt("html"), feedDir: "")
+      job.body = expandExecInMarkdown(nonFrontmatter(pubPath))
+      jobs.add(job)
+    else:
+      discard processFile(pubPath, siteBaseUrl, true, siteLang)
+  convertBatch(jobs)
 
 proc rebuildFeedDir(srcDir: string) =
   ## Rebuild a feed directory wholesale: a change to any post also changes the
@@ -1469,6 +1621,7 @@ proc rebuildFeedDir(srcDir: string) =
   feedRegistry[pubDir] = frontmatter.getOrDefault("title", "RSS Feed")
   feedPostLists[pubDir] = generatePostList(siteBaseUrl, posts)
 
+  var jobs: seq[ConvertJob] = @[]
   for f in mdFiles:
     if not buildDrafts and
         looseFrontmatter(f).getOrDefault("draft", "false") == "true":
@@ -1478,7 +1631,8 @@ proc rebuildFeedDir(srcDir: string) =
         file: f, path: f.changeFileExt("html"),
         feedDir: (if f.endsWith("index.md"): "" else: pubDir))
     job.body = expandExecInMarkdown(nonFrontmatter(f))
-    convertSingle(job)
+    jobs.add(job)
+  convertBatch(jobs)
 
 proc smartRebuild(added, removed, modified: seq[string]) =
   if added.len > 0 or removed.len > 0 or "hunim.toml" in modified:
@@ -1538,8 +1692,7 @@ proc smartRebuild(added, removed, modified: seq[string]) =
     loadComponents()
     for d in feedDirs:
       rebuildFeedDir(d)
-    for p in singles:
-      rebuildSrcPage(p)
+    rebuildSrcPages(singles)
   except CatchableError:
     stderr.styledWriteLine(fgRed, "Rebuild failed: " & getCurrentExceptionMsg())
     stderr.resetAttributes()
