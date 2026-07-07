@@ -2,10 +2,19 @@ import std/[algorithm, atomics, json, sequtils, sets, strformat, strutils,
     terminal, times, os, osproc, tables, typedthreads, mimetypes, xmltree]
 import std/[asynchttpserver, asyncdispatch, uri]
 
-import ./[about, md4c_wrapper, highlight, dag]
+import ./[dag, highlight, md4c_wrapper]
 
 import parsetoml
 
+const version = block:
+  ## Read the version from hunim.nimble at compile time so it lives in one place.
+  var v = ""
+  for line in staticRead("../hunim.nimble").splitLines():
+    if line.startsWith("version"):
+      v = line.split('"')[1]
+      break
+  doAssert v.len > 0, "could not find version in hunim.nimble"
+  v
 
 # Global caches for templates and components
 var templateCache = initTable[string, string]()
