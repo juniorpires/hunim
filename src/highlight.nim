@@ -57,10 +57,21 @@ proc highlightSource(code: string, lang: SourceLanguage): string =
   var g: GeneralTokenizer
   g.initGeneralTokenizer(code)
   result = newStringOfCap(code.len + code.len div 2)
+  var stalls = 0 # consecutive zero-length tokens, to break a genuinely stuck lexer
   while true:
     g.getNextToken(lang)
-    if g.kind == gtEof or g.length == 0:
-      break # gtEof ends the stream; length 0 guards against a stuck tokenizer
+    if g.kind == gtEof:
+      break
+    if g.length == 0:
+      # highlite emits zero-length tokens to advance its lexer state without
+      # consuming input — YAML primes its state machine this way (and again
+      # before quoted scalars). Skip them, but bail after a bounded run so a
+      # truly stuck tokenizer can't hang the build.
+      inc stalls
+      if stalls > 16:
+        break
+      continue
+    stalls = 0
     let text = htmlEscape(code[g.start ..< g.start + g.length])
     let cls = cssClass(g.kind)
     if cls.len == 0:
@@ -71,6 +82,12 @@ proc highlightSource(code: string, lang: SourceLanguage): string =
       result.add "\">"
       result.add text
       result.add "</span>"
+
+func resolveLanguage(langName: string): SourceLanguage =
+  case langName.toLowerAscii
+  of "json": langYaml
+  of "bash", "zsh", "sh": langCmd
+  else: getSourceLanguage(langName)
 
 proc highlightCodeBlocks*(html: string): string {.gcsafe.} =
   ## Rewrite every `language-NAME` code block highlite understands into token
@@ -101,7 +118,7 @@ proc highlightCodeBlocks*(html: string): string {.gcsafe.} =
       break
 
     let inner = html[contentStart ..< closePos]
-    let lang = getSourceLanguage(langName)
+    let lang = resolveLanguage(langName)
     result.add preOpen
     result.add langName
     result.add "\">"

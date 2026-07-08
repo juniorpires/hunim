@@ -50,10 +50,10 @@ Highlighting uses Nim's built-in tokenizer, so it's dependency-free but covers a
 | C# | `csharp`, `c#` |
 | Java | `java` |
 | Python | `python` |
-| YAML | `yaml` |
-| Cmd | `cmd` |
+| YAML | `yaml`, `json` |
+| Cmd | `cmd`, `bash`, `zsh`, `sh` |
 
-Names are case-insensitive. Anything else (`html`, `js`, `bash`, `json`, …) passes through uncolored.
+Names are case-insensitive. A couple of names are aliased to a near-enough lexer: `json` uses the YAML lexer (a near-superset of JSON), and `bash`, `zsh`, and `sh` use the `cmd` lexer. Anything else (`html`, `js`, `toml`, …) passes through uncolored.
 
 The `cmd` lexer is tuned for shell command lines — it picks out the program name, its options and arguments, quoted strings, comments, and operators:
 
@@ -77,7 +77,7 @@ Hunim only emits classes; the colors are yours. Each meaningful token gets one o
 
 | Class | Token |
 |-------|-------|
-| `hl-keyword` | Keywords (and YAML keys) |
+| `hl-keyword` | Keywords |
 | `hl-string` | String and character literals |
 | `hl-escape` | Escape sequences like `\n` |
 | `hl-number` | Numeric literals |
