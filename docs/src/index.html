@@ -6,7 +6,77 @@
   <title>Hunim — Static Site Generator</title>
   <meta name="description" content="Hunim is a small, fast, unopinionated static site generator written in Nim.">
   <link rel="icon" type="image/svg+xml" href="/logo.svg">
-  <link rel="stylesheet" href="/style.css">
+  <style>
+{{ core_style }}
+
+/* ── Hero ── */
+
+.hero {
+  padding: 24px 0 40px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 40px;
+}
+
+.hero h1 { font-size: 2.6em; margin-bottom: 14px; }
+
+.hero .tagline {
+  font-size: 1.15em;
+  color: var(--muted);
+  margin-bottom: 28px;
+  max-width: 500px;
+}
+
+.install-block {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--pre-bg);
+  border-radius: 10px;
+  padding: 14px 20px;
+  max-width: 520px;
+  margin-bottom: 28px;
+}
+
+.install-block code {
+  background: none;
+  border: none;
+  color: var(--pre-text);
+  font-size: 14px;
+  flex: 1;
+}
+
+/* ── Feature grid ── */
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+  margin: 32px 0;
+}
+
+.feature-card {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.feature-card h3 {
+  margin: 0 0 6px;
+  font-size: 0.95em;
+}
+
+.feature-card p {
+  font-size: 13.5px;
+  color: var(--muted);
+  margin: 0;
+}
+
+@media (max-width: 768px) {
+  .hero h1 { font-size: 2em; }
+  .features { grid-template-columns: 1fr; }
+}
+  </style>
 </head>
 <body>
   {{ nav }}
