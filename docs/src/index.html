@@ -50,12 +50,14 @@
 
     <h2>Quick start</h2>
     <p>Install Hunim via Nimble, then create your first site:</p>
-    <pre><code>nimble install https://github.com/basswood-io/hunim
-hunim newsite mysite
-cd mysite
-hunim server</code></pre>
+    <!-- Pre-highlighted by hand to match the build's `cmd` output: index.html is
+         hand-authored HTML, which the highlighter (Markdown-only) never touches. -->
+    <pre><code class="language-cmd"><span class="hl-program">nimble</span> <span class="hl-option">install</span> https://github.com/basswood-io/hunim
+<span class="hl-program">hunim</span> <span class="hl-option">newsite</span> <span class="hl-option">mysite</span>
+<span class="hl-program">cd</span> <span class="hl-option">mysite</span>
+<span class="hl-program">hunim</span> <span class="hl-option">server</span></code></pre>
     <p>Open <code>http://127.0.0.1:8080</code> in your browser. Edit files in <code>src/</code> and the page will reload automatically. When you are ready to publish, run:</p>
-    <pre><code>hunim</code></pre>
+    <pre><code class="language-cmd"><span class="hl-program">hunim</span></code></pre>
     <p>Output is written to the <code>public/</code> directory, ready to deploy to any static host.</p>
 
     <p><a href="/getting-started" class="btn">Read the docs</a></p>

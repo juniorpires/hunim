@@ -11,13 +11,13 @@ Hunim is a static site generator written in [Nim](https://nim-lang.org). It conv
 
 Install via Nimble (requires the Nim toolchain):
 
-```
+```cmd
 nimble install https://github.com/basswood-io/hunim
 ```
 
 To build from source, clone the repo and run:
 
-```
+```cmd
 git clone https://github.com/basswood-io/hunim
 cd hunim
 nimble make
@@ -25,7 +25,7 @@ nimble make
 
 ## Create a new site
 
-```
+```cmd
 hunim newsite mysite
 cd mysite
 ```
@@ -42,7 +42,7 @@ mysite/
 
 ## Start the dev server
 
-```
+```cmd
 hunim server
 ```
 
@@ -50,7 +50,7 @@ The server runs at `http://127.0.0.1:8080` and automatically rebuilds whenever y
 
 ## Build for production
 
-```
+```cmd
 hunim
 ```
 

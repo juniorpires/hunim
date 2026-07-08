@@ -48,6 +48,8 @@ func cssClass(t: TokenClass): string =
   of gtOperator: "hl-operator"
   of gtPreprocessor, gtDirective: "hl-preprocessor"
   of gtRegularExpression: "hl-regex"
+  of gtProgram: "hl-program" # command/program name in `cmd` blocks
+  of gtOption: "hl-option"   # flags, arguments, and quoted strings in `cmd` blocks
   else: ""
 
 proc highlightSource(code: string, lang: SourceLanguage): string =

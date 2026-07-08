@@ -11,7 +11,7 @@ desc: All Hunim commands and flags.
 
 Build the site. Reads from `src/`, writes to `public/`. `hunim build` is an explicit alias for the bare `hunim` command.
 
-```
+```cmd
 hunim [build] [--buildDrafts]
 ```
 
@@ -27,7 +27,7 @@ Building warns on stderr about unused files: templates, components, and exec scr
 
 Start the development server with hot reload.
 
-```
+```cmd
 hunim server [--buildDrafts]
 ```
 
@@ -51,7 +51,7 @@ hunim server [--buildDrafts]
 
 Serve an interactive diagram of the site's structure as a DAG.
 
-```
+```cmd
 hunim dag
 ```
 
@@ -68,7 +68,7 @@ hunim dag
 
 Scaffold a new site directory.
 
-```
+```cmd
 hunim newsite <name>
 ```
 
@@ -89,7 +89,7 @@ Creates a directory called `<name>` containing:
 
 Print the installed version number and exit.
 
-```
+```cmd
 hunim version
 ```
 
