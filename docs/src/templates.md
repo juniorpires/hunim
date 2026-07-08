@@ -36,6 +36,8 @@ Create `templates/default.html` and it will be applied to every Markdown file th
 <tr><td><code>&#123;&#123; .Title &#125;&#125;</code></td><td>The <code>title</code> field from frontmatter.</td></tr>
 <tr><td><code>&#123;&#123; .Date &#125;&#125;</code></td><td>The formatted date (e.g. <code>November 19, 2024</code>). Only set for feed posts.</td></tr>
 <tr><td><code>&#123;&#123; .Author &#125;&#125;</code></td><td>The <code>author</code> field from frontmatter. Only set for feed posts.</td></tr>
+<tr><td><code>&#123;&#123; with .PrevInSection &#125;&#125;...&#123;&#123; end &#125;&#125;</code></td><td>For feed posts, renders the block only when an older neighboring post exists. Inside the block, use <code>&#123;&#123; .RelPermalink &#125;&#125;</code> and <code>&#123;&#123; .Title &#125;&#125;</code>.</td></tr>
+<tr><td><code>&#123;&#123; with .NextInSection &#125;&#125;...&#123;&#123; end &#125;&#125;</code></td><td>For feed posts, renders the block only when a newer neighboring post exists. Inside the block, use <code>&#123;&#123; .RelPermalink &#125;&#125;</code> and <code>&#123;&#123; .Title &#125;&#125;</code>.</td></tr>
 <tr><td><code>&#123;&#123; .Lang &#125;&#125;</code></td><td>The <code>languageCode</code> from <code>hunim.toml</code>.</td></tr>
 <tr><td><code>&#123;&#123; .MetaTags &#125;&#125;</code></td><td>Generated <code>&lt;meta&gt;</code> tags for SEO (og:title, description, canonical URL).</td></tr>
 </tbody>

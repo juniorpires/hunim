@@ -78,6 +78,25 @@ Create a template named after the feed directory with a `_list` suffix:
 
 If the template does not exist, Hunim falls back to `templates/default.html`.
 
+Feed post templates can include Hugo-style `with` blocks to link between posts
+in the feed:
+
+```html
+<article>
+  {{ .Content }}
+  <nav class="feed-nav">
+    {{ with .PrevInSection }}<a href="{{ .RelPermalink }}">← {{ .Title }}</a>{{ end }}
+    {{ with .NextInSection }}<a href="{{ .RelPermalink }}">{{ .Title }} →</a>{{ end }}
+  </nav>
+</article>
+```
+
+Posts are ordered newest-first, matching `{{ .PostList }}`.
+`{{ with .PrevInSection }}` renders only when there is an older neighboring
+post, so the newest post shows only that link. `{{ with .NextInSection }}`
+renders only when there is a newer neighboring post, so the oldest post shows
+only that link.
+
 ## Post frontmatter
 
 Each post should include `title`, `date`, and optionally `author` and `desc`:

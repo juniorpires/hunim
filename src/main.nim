@@ -29,6 +29,12 @@ var feedRegistry = initTable[string, string]()
 # Maps a feed directory (e.g. "public/blog") to the generated HTML list of its
 # posts, which is injected into the feed's index page via {{ .PostList }}.
 var feedPostLists = initTable[string, string]()
+# Maps a feed post path (e.g. "public/blog/post.md") to generated navigation
+# data for the neighboring posts in that feed.
+var feedPostNav = initTable[string, tuple[
+  prevTitle: string, prevRelPermalink: string,
+  nextTitle: string, nextRelPermalink: string
+]]()
 var buildDrafts = false
 # When keepMarkdown is set (via the [markdown] table in hunim.toml), each page's
 # source Markdown is published alongside its HTML at the same route with a .md
@@ -400,13 +406,53 @@ proc loadComponents() =
   for name in names:
     resolve(name)
 
+proc renderWithBlock(content, blockName, title, relPermalink: string): string =
+  ## Render the small Hugo-style subset used for feed neighbor links:
+  ## {{ with .PrevInSection }}...{{ end }} and {{ with .NextInSection }}...{{ end }}.
+  let openTag = "{{ with ." & blockName & " }}"
+  let closeTag = "{{ end }}"
+  var i = 0
+  while true:
+    let openIdx = content.find(openTag, i)
+    if openIdx == -1:
+      if i < content.len:
+        result &= content[i .. ^1]
+      break
+    result &= content[i ..< openIdx]
+    let bodyStart = openIdx + openTag.len
+    let closeIdx = content.find(closeTag, bodyStart)
+    if closeIdx == -1:
+      result &= content[openIdx .. ^1]
+      break
+    if relPermalink != "":
+      var body = content[bodyStart ..< closeIdx]
+      body = body.replace("{{ .RelPermalink }}", relPermalink)
+      body = body.replace("{{ .Title }}", title)
+      result &= body
+    i = closeIdx + closeTag.len
+
+proc renderWithBlocks(content: string, context: Table[string, string]): string =
+  result = ""
+  for seg in codeSegments(content):
+    if seg.isCode:
+      result &= seg.text
+    else:
+      var text = seg.text
+      text = renderWithBlock(text, "PrevInSection",
+          context.getOrDefault("PrevInSection.Title", ""),
+          context.getOrDefault("PrevInSection.RelPermalink", ""))
+      text = renderWithBlock(text, "NextInSection",
+          context.getOrDefault("NextInSection.Title", ""),
+          context.getOrDefault("NextInSection.RelPermalink", ""))
+      result &= text
+
 proc renderTemplate(templateContent: string, context: Table[string,
     string]): string =
   ## Render a Go-style template by replacing {{ .Key }} with context values,
   ## skipping any inside <pre>/<code> so documented tags stay literal. Each key
   ## re-scans the current result, so content injected by an earlier key (e.g.
   ## the page body via {{ .Content }}) is protected too.
-  result = templateContent
+  result = renderWithBlocks(templateContent, context)
   for key, value in context:
     let tag = "{{ ." & key & " }}"
     var rebuilt = ""
@@ -677,6 +723,43 @@ proc generatePostList(baseUrl: string, posts: seq[BlogPost]): string =
     let displayDate = formatDisplayDate(post.pubDate)
     lines.add(&"<p><a href=\"{href}\">{renderInline(post.title)}</a> {displayDate}</p>")
   return lines.join("\n")
+
+proc clearFeedPostNav(feedDir: string) =
+  ## Remove cached navigation for a feed before repopulating it, so posts that
+  ## become drafts/no-index do not keep stale buttons during server rebuilds.
+  var stale: seq[string] = @[]
+  for path in feedPostNav.keys:
+    if path.startsWith(feedDir & "/"):
+      stale.add(path)
+  for path in stale:
+    feedPostNav.del(path)
+
+proc generatePostNav(baseUrl, feedDir: string, posts: seq[BlogPost]) =
+  ## Build template-ready PrevInSection/NextInSection data in newest-first order.
+  clearFeedPostNav(feedDir)
+  for i, post in posts:
+    let prevTitle =
+      if i == posts.high: ""
+      else: posts[i + 1].title
+    let prevRelPermalink =
+      if i == posts.high:
+        ""
+      else:
+        posts[i + 1].link.replace(baseUrl, "/")
+    let nextTitle =
+      if i == 0: ""
+      else: posts[i - 1].title
+    let nextRelPermalink =
+      if i == 0:
+        ""
+      else:
+        posts[i - 1].link.replace(baseUrl, "/")
+    feedPostNav[post.path] = (
+      prevTitle: prevTitle,
+      prevRelPermalink: prevRelPermalink,
+      nextTitle: nextTitle,
+      nextRelPermalink: nextRelPermalink
+    )
 
 proc generateRSSFeed(frontmatter: Table[string, string], lang, baseUrl,
     outputPath: string, posts: seq[BlogPost]) =
@@ -969,6 +1052,15 @@ proc renderConvertedMarkdown(job: ConvertJob, htmlOutput: string): PageResult =
       context["Date"] = formatDisplayDate(frontmatter["date"])
       if frontmatter.hasKey("author"):
         context["Author"] = frontmatter["author"]
+    if job.feedDir != "":
+      let nav = feedPostNav.getOrDefault(job.file, (
+        prevTitle: "", prevRelPermalink: "",
+        nextTitle: "", nextRelPermalink: ""
+      ))
+      context["PrevInSection.Title"] = nav.prevTitle
+      context["PrevInSection.RelPermalink"] = nav.prevRelPermalink
+      context["NextInSection.Title"] = nav.nextTitle
+      context["NextInSection.RelPermalink"] = nav.nextRelPermalink
 
     context["Content"] = content
     context["Lang"] = job.lang
@@ -1280,6 +1372,7 @@ proc main(doReload: bool) =
   var sitemapUrls: seq[string] = @[]
   feedRegistry.clear()
   feedPostLists.clear()
+  feedPostNav.clear()
   execCache.clear()
 
   proc collectJobs(dir: string, isFeed: bool, jobs: var seq[ConvertJob]) =
@@ -1316,6 +1409,7 @@ proc main(doReload: bool) =
                 toUnixPath(path / "index.xml"), posts)
             feedRegistry[path] = frontmatter.getOrDefault("title", "RSS Feed")
             feedPostLists[path] = generatePostList(baseUrl, posts)
+            generatePostNav(baseUrl, path, posts)
         collectJobs(path, isFeed2, jobs)
 
   var jobs: seq[ConvertJob] = @[]
@@ -1620,6 +1714,7 @@ proc rebuildFeedDir(srcDir: string) =
       toUnixPath(pubDir / "index.xml"), posts)
   feedRegistry[pubDir] = frontmatter.getOrDefault("title", "RSS Feed")
   feedPostLists[pubDir] = generatePostList(siteBaseUrl, posts)
+  generatePostNav(siteBaseUrl, pubDir, posts)
 
   var jobs: seq[ConvertJob] = @[]
   for f in mdFiles:
