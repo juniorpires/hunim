@@ -84,6 +84,10 @@ proc error(msg: string) =
 proc warn(msg: string) =
   stderr.styledWriteLine(fgYellow, msg, resetStyle)
 
+proc requireConfig() =
+  if not fileExists("hunim.toml"):
+    error "Expected hunim.toml in the current directory. Run `hunim build` from a Hunim site root."
+
 func toUnixPath(path: string): string =
   ## Normalize OS path separators to '/'. On Windows, walkDir/walkFiles and the
   ## `/` operator emit '\', but the URL- and prefix-rewriting throughout the
@@ -1337,6 +1341,8 @@ proc warnUnused(scan: SiteScan) =
       warn &"Warning: unused exec script: components/{sc}"
 
 proc main(doReload: bool) =
+  requireConfig()
+
   try:
     removeDir("public")
   except Exception:
