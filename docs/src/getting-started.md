@@ -12,7 +12,7 @@ Hunim is a static site generator written in [Nim](https://nim-lang.org). It conv
 Install via Nimble (requires the Nim toolchain):
 
 ```cmd
-nimble install https://github.com/basswood-io/hunim
+nimble install hunim
 ```
 
 To build from source, clone the repo and run:
